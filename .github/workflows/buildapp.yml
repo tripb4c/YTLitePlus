@@ -151,24 +151,36 @@ jobs:
           test -n "$APPDIR"
 
       # ---------- PRUNE ONLY selected dylibs that commonly break login ----------
-      - name: Disable only problematic dylibs (rename to .off)
-        if: ${{ steps.locate_stage.outcome == 'success' }}
+     - name: Whitelist only essential dylibs for login (rename all others to .off)
+        env:
+          # EDIT THIS for each test run (regex OR pattern)
+          # Start with only the two “core” items below; we’ll add more if needed.
+          WHITELIST_REGEX: "YTLitePlus|YTLite"
         run: |
           set -euxo pipefail
           APPDIR="${APPDIR:?}"
-          echo "==> Listing injected dylibs under ${APPDIR}"
+
+          echo "==> All injected dylibs under ${APPDIR}:"
           find "$APPDIR" -type f -name "*.dylib" | sort | tee all_dylibs.txt || true
 
-          # Only disable if name matches our regex
+          # Enable only the whitelist; disable everything else
           if [ -s all_dylibs.txt ]; then
-            grep -E "${DISABLE_DYLIBS_REGEX}" all_dylibs.txt || true
+            echo "==> Keeping libs that match: ${WHITELIST_REGEX}"
             while IFS= read -r f; do
-              if echo "$f" | grep -Eq "${DISABLE_DYLIBS_REGEX}"; then
-                echo "Disabling: $f"
-                mv "$f" "${f}.off"
+              base="$(basename "$f")"
+              if echo "$base" | grep -Eq "${WHITELIST_REGEX}"; then
+                echo "KEEP   : $base"
+                # If previously disabled, restore (strip .off)
+                if [ -f "${f}.off" ]; then mv "${f}.off" "$f" || true; fi
+              else
+                echo "DISABLE: $base"
+                if [ ! -f "${f}.off" ]; then mv "$f" "${f}.off" || true; fi
               fi
             done < all_dylibs.txt
           fi
+
+          echo "==> Active dylibs after whitelist:"
+          find "$APPDIR" -type f -name "*.dylib" -print | sed 's/^/  /' || true
 
       # ---------- If no IPA yet, zip the (possibly pruned) Payload ----------
       - name: Package IPA (fallback zipper)
