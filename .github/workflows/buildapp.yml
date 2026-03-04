@@ -1,4 +1,4 @@
-name: Build YTLitePlus (Original + selective disable)
+name: Build YTLitePlus (Original + Whitelist Prune)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       decrypted_youtube_url:
-        description: "Direct URL of the decrypted YouTube IPA (ArmConverter)"
+        description: "Direct URL to your ArmConverter decrypted YouTube IPA"
         default: "https://example.com/YouTube_decrypted.ipa"
         required: true
         type: string
@@ -26,13 +26,14 @@ jobs:
     permissions:
       contents: read
 
+    # Edit this line to add tweaks back safely (one at a time).
+    # Start minimal, then expand: e.g., add |YTAB, |YouPiP, etc.
     env:
-      # ⬇️ Disable only the dylibs most often linked to login/WebKit/session issues.
-      # We only rename these to *.off after staging; everything else stays 100% original.
-      DISABLE_DYLIBS_REGEX: "Return|Dislike|Sponsor|YouPiP|YTVideoOverlay|FLEX|UHD|ABConfig|GroupSettings|NoTracking"
+      WHITELIST_REGEX: "YTLitePlus|YTLite"
 
     steps:
-      - name: Checkout (keep submodules)
+      # 1) Toolchain -----------------------------------------------------------
+      - name: Checkout
         uses: actions/checkout@v4
         with:
           submodules: recursive
@@ -49,7 +50,7 @@ jobs:
           submodules: recursive
 
       - name: Cache iOS SDK
-        id: SDK
+        id: sdk
         uses: actions/cache@v3
         env:
           cache-name: iOS-${{ inputs.sdk_version }}-SDK
@@ -59,7 +60,7 @@ jobs:
           restore-keys: ${{ env.cache-name }}
 
       - name: Download iOS SDK (if cache miss)
-        if: steps.SDK.outputs.cache-hit != 'true'
+        if: steps.sdk.outputs.cache-hit != 'true'
         env:
           THEOS: ${{ github.workspace }}/theos
         run: |
@@ -82,7 +83,9 @@ jobs:
       - name: Install Theos Jailed
         env:
           THEOS: ${{ github.workspace }}/theos
-        run: ./theos-jailed/install
+        run: |
+          set -euxo pipefail
+          ./theos-jailed/install
 
       - name: Put GNU make in PATH
         run: |
@@ -90,54 +93,43 @@ jobs:
           (echo 'export PATH="/usr/local/opt/make/libexec/gnubin:$PATH"' >> ~/.bash_profile)
           source ~/.bash_profile || true
 
-      # ---------- Prepare base IPA (no stripping, no plist edits) ----------
+      # 2) Bring in your decrypted IPA (untouched) ----------------------------
       - name: Capture YT IPA URL
         run: |
           URL_YT="$(jq -r '.inputs.decrypted_youtube_url' "$GITHUB_EVENT_PATH")"
           echo "::add-mask::$URL_YT"
           echo "URL_YT=$URL_YT" >> "$GITHUB_ENV"
 
-      - name: Prepare YouTube IPA (keep PlugIns, keep plist)
+      - name: Prepare YouTube IPA (no stripping, no plist edits)
         run: |
           set -euxo pipefail
           mkdir -p tmp
-          if ! wget "$URL_YT" --quiet -o /dev/null -O YouTube.ipa ; then
+          if ! wget "$URL_YT" --quiet -O YouTube.ipa ; then
             curl -L "$URL_YT" -o YouTube.ipa
           fi
           unzip -q YouTube.ipa -d tmp
-          # Read CFBundleVersion for artifact naming (best-effort)
-          if /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist" >/dev/null 2>&1; then
+          # Capture version for artifact name (best-effort)
+          if /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist" >/dev/null 2>&1 ; then
             ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist")
             echo "YT_VERSION=$ver" >> "$GITHUB_ENV"
           else
             echo "YT_VERSION=unknown" >> "$GITHUB_ENV"
           fi
 
-      # ---------- Let original project build with its submodules ----------
-      # We don't sed the Makefile or delete PlugIns/signatures. Keep it original.
-      - name: Build (original scheme, jailed rootless)
-        id: theos_build
+      # 3) Build using the project's original Makefile ------------------------
+      - name: Build (original scheme; we will repackage from stage)
         env:
           THEOS: ${{ github.workspace }}/theos
         run: |
           set -euxo pipefail
           export MAKEFLAGS=-j$(sysctl -n hw.ncpu)
-          rm -rf packages && mkdir -p packages
+          # Do NOT edit Makefile or strip PlugIns; preserve original behavior
           make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 | tee build.log || true
-
-          echo "==> After make, list packages:"
+          echo "==> packages/ (from make, if any):"
           ls -lah packages || true
 
-          # If Theos already produced an IPA, capture name and continue to pruning step.
-          if ls packages/*.ipa >/dev/null 2>&1 ; then
-            echo "ipa_ready=1" >> "$GITHUB_OUTPUT"
-            echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
-          else
-            echo "ipa_ready=0" >> "$GITHUB_OUTPUT"
-          fi
-
-      # ---------- If needed, gather staged Payload for pruning ----------
-      - name: Locate staged YouTube.app (from tmp/ or .theos/staging)
+      # 4) Locate staged YouTube.app for pruning/packaging --------------------
+      - name: Locate staged YouTube.app
         id: locate_stage
         run: |
           set -euxo pipefail
@@ -150,73 +142,9 @@ jobs:
           echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
           test -n "$APPDIR"
 
-      # ---------- PRUNE ONLY selected dylibs that commonly break login ----------
-     - name: Whitelist only essential dylibs for login (rename all others to .off)
-        env:
-          # EDIT THIS for each test run (regex OR pattern)
-          # Start with only the two “core” items below; we’ll add more if needed.
-          WHITELIST_REGEX: "YTLitePlus|YTLite"
+      # 5) Whitelist: keep only essential dylibs; disable rest ----------------
+      - name: Whitelist only essential dylibs for login (rename others to .off)
         run: |
           set -euxo pipefail
           APPDIR="${APPDIR:?}"
-
           echo "==> All injected dylibs under ${APPDIR}:"
-          find "$APPDIR" -type f -name "*.dylib" | sort | tee all_dylibs.txt || true
-
-          # Enable only the whitelist; disable everything else
-          if [ -s all_dylibs.txt ]; then
-            echo "==> Keeping libs that match: ${WHITELIST_REGEX}"
-            while IFS= read -r f; do
-              base="$(basename "$f")"
-              if echo "$base" | grep -Eq "${WHITELIST_REGEX}"; then
-                echo "KEEP   : $base"
-                # If previously disabled, restore (strip .off)
-                if [ -f "${f}.off" ]; then mv "${f}.off" "$f" || true; fi
-              else
-                echo "DISABLE: $base"
-                if [ ! -f "${f}.off" ]; then mv "$f" "${f}.off" || true; fi
-              fi
-            done < all_dylibs.txt
-          fi
-
-          echo "==> Active dylibs after whitelist:"
-          find "$APPDIR" -type f -name "*.dylib" -print | sed 's/^/  /' || true
-
-      # ---------- If no IPA yet, zip the (possibly pruned) Payload ----------
-      - name: Package IPA (fallback zipper)
-        if: ${{ steps.theos_build.outputs.ipa_ready != '1' }}
-        run: |
-          set -euxo pipefail
-          mkdir -p packages
-          if [ -d "tmp/Payload/YouTube.app" ]; then
-            (cd tmp && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
-          elif [ -d ".theos/staging/Applications/YouTube.app" ]; then
-            rm -rf Payload && mkdir -p Payload
-            cp -a .theos/staging/Applications/YouTube.app Payload/
-            /usr/bin/zip -qry packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload
-            rm -rf Payload
-          else
-            echo "ERROR: Couldn't find staged app to zip."
-            exit 1
-          fi
-
-      - name: Pick final artifact name
-        id: pick
-        run: |
-          set -euxo pipefail
-          if ls packages/*.ipa >/dev/null 2>&1; then
-            echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
-          else
-            echo "ERROR: No IPA in packages/"; exit 1
-          fi
-          echo "### Base YT: ${YT_VERSION}" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Disabled dylibs regex: ${DISABLE_DYLIBS_REGEX}" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Artifact: $(ls -t packages | head -n1)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload Artifact
-        if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: YTLitePlus_pruned_${{ env.YT_VERSION }}
-          path: packages/${{ steps.pick.outputs.package }}
-          if-no-files-found: error
