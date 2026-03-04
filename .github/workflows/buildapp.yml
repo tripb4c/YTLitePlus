@@ -1,4 +1,4 @@
-name: Build YTLitePlus (Original + Whitelist Prune)
+name: Build YTLitePlus (Original + Whitelist + Always Upload)
 
 on:
   workflow_dispatch:
@@ -26,8 +26,7 @@ jobs:
     permissions:
       contents: read
 
-    # Edit this line to add tweaks back safely (one at a time).
-    # Start minimal, then expand: e.g., add |YTAB, |YouPiP, etc.
+    # Keep this minimal. Start with core only; add items (e.g., |YTAB, |YouPiP) one at a time.
     env:
       WHITELIST_REGEX: "YTLitePlus|YTLite"
 
@@ -117,18 +116,32 @@ jobs:
           fi
 
       # 3) Build using the project's original Makefile ------------------------
-      - name: Build (original scheme; we will repackage from stage)
+      - name: Build (original scheme)
+        id: theos_build
         env:
           THEOS: ${{ github.workspace }}/theos
         run: |
           set -euxo pipefail
           export MAKEFLAGS=-j$(sysctl -n hw.ncpu)
+          rm -rf packages && mkdir -p packages
           # Do NOT edit Makefile or strip PlugIns; preserve original behavior
           make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 | tee build.log || true
-          echo "==> packages/ (from make, if any):"
-          ls -lah packages || true
 
-      # 4) Locate staged YouTube.app for pruning/packaging --------------------
+          echo "==> packages/ (after make):"
+          ls -lah packages || true
+          echo "==> .theos/staging top:"
+          find .theos/staging -maxdepth 3 -type d -print | head -n 30 || true
+          echo "==> tmp/Payload top:"
+          find tmp/Payload -maxdepth 3 -type d -print || true
+
+          if ls packages/*.ipa >/dev/null 2>&1; then
+            echo "ipa_ready=1" >> "$GITHUB_OUTPUT"
+            echo "built_ipa=$(ls -t packages/*.ipa | head -n1)" >> "$GITHUB_OUTPUT"
+          else
+            echo "ipa_ready=0" >> "$GITHUB_OUTPUT"
+          fi
+
+      # 4) Locate staged YouTube.app (where we will prune) --------------------
       - name: Locate staged YouTube.app
         id: locate_stage
         run: |
@@ -136,15 +149,105 @@ jobs:
           APPDIR=
           if [ -d "tmp/Payload/YouTube.app" ]; then
             APPDIR="tmp/Payload/YouTube.app"
-          elif [ -d ".theos/staging/Applications/YouTube.app" ]; then
+          fi
+          if [ -d ".theos/staging/Applications/YouTube.app" ]; then
+            # prefer staged over base if present
             APPDIR=".theos/staging/Applications/YouTube.app"
           fi
           echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
-          test -n "$APPDIR"
+          if [ -z "$APPDIR" ]; then
+            echo "ERROR: No staged YouTube.app found in tmp/ or .theos/staging/"
+            exit 1
+          fi
+          echo "Using APPDIR=$APPDIR"
 
       # 5) Whitelist: keep only essential dylibs; disable rest ----------------
-      - name: Whitelist only essential dylibs for login (rename others to .off)
+      - name: Whitelist dylibs (keep regex, disable others)
         run: |
           set -euxo pipefail
           APPDIR="${APPDIR:?}"
+
           echo "==> All injected dylibs under ${APPDIR}:"
+          find "$APPDIR" -type f -name "*.dylib" | sort | tee all_dylibs.txt || true
+
+          echo "==> Keeping libs that match: ${WHITELIST_REGEX}"
+          if [ -s all_dylibs.txt ]; then
+            while IFS= read -r f; do
+              base="$(basename "$f")"
+              if echo "$base" | grep -Eq "${WHITELIST_REGEX}"; then
+                echo "KEEP   : $base"
+                # If previously disabled, restore it
+                if [ -f "${f}.off" ]; then mv "${f}.off" "$f" || true; fi
+              else
+                echo "DISABLE: $base"
+                if [ ! -f "${f}.off" ]; then mv "$f" "${f}.off" || true; fi
+              fi
+            done < all_dylibs.txt
+          fi
+
+          echo "==> Active dylibs after whitelist:"
+          find "$APPDIR" -type f -name "*.dylib" -print | sed 's/^/  /' || true
+
+      # 6) Always produce a final IPA -----------------------------------------
+      - name: Package final IPA (from stage if needed)
+        id: package
+        run: |
+          set -euxo pipefail
+          mkdir -p packages
+
+          # A) If Theos already produced an IPA, prefer that but also create a pruned IPA from stage.
+          if [ "${{ steps.theos_build.outputs.ipa_ready }}" = "1" ]; then
+            echo "Theos built IPA: ${{ steps.theos_build.outputs.built_ipa }}"
+            # Try to also zip the staged (pruned) Payload to ensure whitelist takes effect
+            if [ -d "tmp/Payload/YouTube.app" ]; then
+              (cd tmp && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
+              FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
+            elif [ -d ".theos/staging/Applications/YouTube.app" ]; then
+              rm -rf Payload && mkdir -p Payload
+              cp -a .theos/staging/Applications/YouTube.app Payload/
+              /usr/bin/zip -qry packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload
+              rm -rf Payload
+              FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
+            else
+              FINAL="${{ steps.theos_build.outputs.built_ipa }}"
+            fi
+          else
+            # B) No IPA from Theos; zip staged Payload
+            if [ -d "tmp/Payload/YouTube.app" ]; then
+              (cd tmp && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
+              FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
+            elif [ -d ".theos/staging/Applications/YouTube.app" ]; then
+              rm -rf Payload && mkdir -p Payload
+              cp -a .theos/staging/Applications/YouTube.app Payload/
+              /usr/bin/zip -qry packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload
+              rm -rf Payload
+              FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
+            else
+              echo "ERROR: Couldn't find staged app to zip."
+              exit 1
+            fi
+          fi
+
+          ls -lah packages || true
+          test -f "$FINAL"
+          echo "package=$FINAL" >> "$GITHUB_OUTPUT"
+          echo "### Base YouTube Version: ${YT_VERSION}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Whitelist regex: ${WHITELIST_REGEX}" >> "$GITHUB_STEP_SUMMARY"
+          echo "### Artifact: ${FINAL}" >> "$GITHUB_STEP_SUMMARY"
+
+      # 7) Upload IPA (and, if needed, the whole directory for debugging) -----
+      - name: Upload IPA Artifact
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: YTLitePlus_build_${{ env.YT_VERSION }}
+          path: ${{ steps.package.outputs.package }}
+          if-no-files-found: error
+
+      - name: Upload packages folder (diagnostic)
+        if: ${{ inputs.upload_artifact }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages_diagnostics_${{ env.YT_VERSION }}
+          path: packages/
+          if-no-files-found: warn
