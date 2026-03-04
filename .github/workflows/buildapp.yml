@@ -16,12 +16,12 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15-intel
+    runs-on: macos-14
     permissions:
-      contents: read     # no writes back to repo; avoids 'update file' failures
+      contents: read
 
     steps:
-      # --- Source & toolchain -------------------------------------------------
+      # 1) Toolchain
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -39,7 +39,7 @@ jobs:
           submodules: recursive
 
       - name: Cache iOS SDK
-        id: SDK
+        id: sdk
         uses: actions/cache@v3
         env:
           cache-name: iOS-${{ inputs.sdk_version }}-SDK
@@ -49,17 +49,17 @@ jobs:
           restore-keys: ${{ env.cache-name }}
 
       - name: Download iOS SDK (if cache miss)
-        if: steps.SDK.outputs.cache-hit != 'true'
+        if: steps.sdk.outputs.cache-hit != 'true'
+        env:
+          THEOS: ${{ github.workspace }}/theos
         run: |
           set -euxo pipefail
           git clone -n --depth=1 --filter=tree:0 https://github.com/aricloverEXTRA/sdks/
           cd sdks
-          git sparse-checkout set --no-cone iPhoneOS${{ inputs.sdk_version }}.sdk
+          git sparse-checkout set --no-cone "iPhoneOS${{ inputs.sdk_version }}.sdk"
           git checkout
           mkdir -p "$THEOS/sdks"
           mv *.sdk "$THEOS/sdks"
-        env:
-          THEOS: ${{ github.workspace }}/theos
 
       - name: Download Theos Jailed
         uses: actions/checkout@v4
@@ -70,122 +70,128 @@ jobs:
           submodules: recursive
 
       - name: Install Theos Jailed
-        run: ./theos-jailed/install
         env:
           THEOS: ${{ github.workspace }}/theos
+        run: |
+          set -euxo pipefail
+          ./theos-jailed/install
 
       - name: Put GNU make in PATH
         run: |
-          echo "$(brew --prefix make)/libexec/gnubin" >> $GITHUB_PATH
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
           (echo 'export PATH="/usr/local/opt/make/libexec/gnubin:$PATH"' >> ~/.bash_profile)
-          source ~/.bash_profile
+          source ~/.bash_profile || true
 
-      # --- Bring in your ArmConverter IPA (untouched) -------------------------
+      # 2) Bring in your decrypted IPA (untouched)
       - name: Capture your decrypted IPA URL
         run: |
-          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' $GITHUB_EVENT_PATH)"
-          echo ::add-mask::$URL_YT
-          echo "URL_YT=$URL_YT" >> $GITHUB_ENV
+          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' "$GITHUB_EVENT_PATH")"
+          echo "::add-mask::$URL_YT"
+          echo "URL_YT=$URL_YT" >> "$GITHUB_ENV"
 
       - name: Prepare YouTube IPA (no stripping, no plist edits)
         run: |
           set -euxo pipefail
           mkdir -p tmp
-          wget "$URL_YT" --quiet -O YouTube_decrypted.ipa || curl -L "$URL_YT" -o YouTube_decrypted.ipa
+          if ! wget "$URL_YT" --quiet -O YouTube_decrypted.ipa ; then
+            curl -L "$URL_YT" -o YouTube_decrypted.ipa
+          fi
           unzip -q YouTube_decrypted.ipa -d tmp
-
-          # Best-effort version capture for artifact name
-          if /usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "tmp/Payload/YouTube.app/Info.plist" >/dev/null 2>&1; then
-            echo "YT_VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" tmp/Payload/YouTube.app/Info.plist)" >> $GITHUB_ENV
+          if /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist" >/dev/null 2>&1 ; then
+            ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist")
+            echo "YT_VERSION=$ver" >> "$GITHUB_ENV"
           else
-            echo "YT_VERSION=unknown" >> $GITHUB_ENV
+            echo "YT_VERSION=unknown" >> "$GITHUB_ENV"
           fi
 
-      # --- Fetch YTLite core and stage it ------------------------------------
+      # 3) Fetch YTLite core
       - name: Fetch YTLite core (latest release)
         run: |
           set -euxo pipefail
           mkdir -p Tweaks/YTLite
           YTLITE_VERSION=$(curl -s https://api.github.com/repos/dayanch96/YTLite/releases/latest | jq -r '.tag_name' | sed 's/^v//')
           test -n "$YTLITE_VERSION"
-          echo "YTLITE_VERSION=$YTLITE_VERSION" >> $GITHUB_ENV
+          echo "YTLITE_VERSION=$YTLITE_VERSION" >> "$GITHUB_ENV"
           curl -L -o Tweaks/YTLite/ytlite.deb "https://github.com/dayanch96/YTLite/releases/download/v${YTLITE_VERSION}/com.dvntm.ytlite_${YTLITE_VERSION}_iphoneos-arm64.deb"
           tar -xf Tweaks/YTLite/ytlite.deb -C Tweaks/YTLite || true
           tar -xf Tweaks/YTLite/data.tar* -C Tweaks/YTLite
           test -f Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
 
-      # --- Provide a minimal Theos project on-the-fly (YTLite only) -----------
+      # 4) Provide minimal Theos project (NO heredocs — only printf)
       - name: Provide minimal Makefile + files (YTLite core only)
+        shell: bash
         run: |
-          set -euxo pipefail
-          cat > Makefile <<'MK'
-export TARGET = iphone:clang:18.6:14.0
-export SDK_PATH = $(THEOS)/sdks/iPhoneOS18.6.sdk/
-export SYSROOT = $(SDK_PATH)
-export ARCHS = arm64
+          set -euo pipefail
 
-PACKAGE_NAME = YTLitePlus
-PACKAGE_VERSION = 1.0
-INSTALL_TARGET_PROCESSES = YouTube
-TWEAK_NAME = YTLitePlus
+          # --- Makefile ---
+          {
+            printf '%s\n' 'export TARGET = iphone:clang:18.6:14.0'
+            printf '%s\n' 'export SDK_PATH = $(THEOS)/sdks/iPhoneOS18.6.sdk/'
+            printf '%s\n' 'export SYSROOT = $(SDK_PATH)'
+            printf '%s\n' 'export ARCHS = arm64'
+            printf '%s\n' ''
+            printf '%s\n' 'PACKAGE_NAME = YTLitePlus'
+            printf '%s\n' 'PACKAGE_VERSION = 1.0'
+            printf '%s\n' 'INSTALL_TARGET_PROCESSES = YouTube'
+            printf '%s\n' 'TWEAK_NAME = YTLitePlus'
+            printf '%s\n' ''
+            printf '%s\n' '# Keep stock identity so extensions match during install/login'
+            printf '%s\n' 'DISPLAY_NAME = YouTube'
+            printf '%s\n' 'BUNDLE_ID    = com.google.ios.youtube'
+            printf '%s\n' ''
+            printf '%s\n' '# Minimal: just a placeholder file so Theos builds'
+            printf '%s\n' 'YTLitePlus_FILES = dummy.m'
+            printf '%s\n' 'YTLitePlus_FRAMEWORKS = UIKit Security'
+            printf '%s\n' ''
+            printf '%s\n' '# ---- Inject ONLY YTLite core (no other tweaks) ----'
+            printf '%s\n' 'YTLitePlus_INJECT_DYLIBS = Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib'
+            printf '%s\n' ''
+            printf '%s\n' '# Leave app resources/signature/plug-ins untouched'
+            printf '%s\n' 'YTLitePlus_CFLAGS = -fobjc-arc'
+            printf '%s\n' 'YTLitePlus_IPA = ./tmp/Payload/YouTube.app'
+            printf '%s\n' ''
+            printf '%s\n' 'include $(THEOS)/makefiles/common.mk'
+            printf '%s\n' 'include $(THEOS_MAKE_PATH)/tweak.mk'
+            printf '%s\n' ''
+            printf '%s\n' 'FINALPACKAGE = 1'
+            printf '%s\n' 'CODESIGN_IPA = 0'
+          } > Makefile
 
-# Keep stock identity so extensions match during install/login
-DISPLAY_NAME = YouTube
-BUNDLE_ID    = com.google.ios.youtube
+          # --- dummy.m ---
+          printf '%s\n' '// intentionally empty' > dummy.m
 
-# Minimal: just a placeholder file so Theos builds
-YTLitePlus_FILES = dummy.m
-YTLitePlus_FRAMEWORKS = UIKit Security
+          # --- YTLitePlus.plist ---
+          {
+            printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+            printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            printf '%s\n' '<plist version="1.0">'
+            printf '%s\n' '<dict>'
+            printf '%s\n' '  <key>Filter</key>'
+            printf '%s\n' '  <dict>'
+            printf '%s\n' '    <key>Bundles</key>'
+            printf '%s\n' '    <array>'
+            printf '%s\n' '      <string>com.google.ios.youtube</string>'
+            printf '%s\n' '    </array>'
+            printf '%s\n' '  </dict>'
+            printf '%s\n' '</dict>'
+            printf '%s\n' '</plist>'
+          } > YTLitePlus.plist
 
-# ---- Inject ONLY YTLite core (no other tweaks) ----
-YTLitePlus_INJECT_DYLIBS = Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
+          # --- control (Debian metadata required by 'make package') ---
+          {
+            printf '%s\n' 'Package: com.tripb4c.ytliteplus.light'
+            printf '%s\n' 'Name: YTLitePlus-Light'
+            printf '%s\n' 'Version: 1.0'
+            printf '%s\n' 'Architecture: iphoneos-arm64'
+            printf '%s\n' 'Description: YouTube + YTLite core only (light build)'
+            printf '%s\n' 'Maintainer: Isaac <you@example.com>'
+            printf '%s\n' 'Author: Isaac <you@example.com>'
+            printf '%s\n' 'Section: Tweaks'
+            printf '%s\n' 'Priority: optional'
+            printf '%s\n' 'Depends: firmware (>= 14.0)'
+          } > control
 
-# Leave app resources/signature/plug-ins untouched
-YTLitePlus_CFLAGS = -fobjc-arc
-YTLitePlus_IPA = ./tmp/Payload/YouTube.app
-
-include $(THEOS)/makefiles/common.mk
-include $(THEOS_MAKE_PATH)/tweak.mk
-
-FINALPACKAGE = 1
-CODESIGN_IPA = 0
-MK
-
-          printf "%s\n" "// intentionally empty" > dummy.m
-
-          # Filter: inject into com.google.ios.youtube
-          cat > YTLitePlus.plist <<'PL'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
- "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Filter</key>
-  <dict>
-    <key>Bundles</key>
-    <array>
-      <string>com.google.ios.youtube</string>
-    </array>
-  </dict>
-</dict>
-</plist>
-PL
-
-          # Minimal control so 'make package' works
-          cat > control <<'CTL'
-Package: com.tripb4c.ytliteplus.light
-Name: YTLitePlus-Light
-Version: 1.0
-Architecture: iphoneos-arm64
-Description: YouTube + YTLite core only (light build)
-Maintainer: Isaac <you@example.com>
-Author: Isaac <you@example.com>
-Section: Tweaks
-Priority: optional
-Depends: firmware (>= 14.0)
-CTL
-
-      # --- Build and guarantee an IPA artifact --------------------------------
+      # 5) Build and guarantee an IPA artifact
       - name: Build Package (Theos) — with fallback zipper
         id: build_package
         env:
@@ -197,22 +203,22 @@ CTL
           make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 | tee build.log
 
           # If Theos already produced an IPA:
-          if ls packages/*.ipa >/dev/null 2>&1; then
-            echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
+          if ls packages/*.ipa >/dev/null 2>&1 ; then
+            echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           # Fallback: zip staged Payload (contains our injected changes)
-          if [ -d "tmp/Payload/YouTube.app" ]; then
+          if [ -d "tmp/Payload/YouTube.app" ] ; then
             pushd tmp >/dev/null
-            /usr/bin/zip -qry ../packages/YTLitePlus_light_${{ env.YT_VERSION }}_${{ env.YTLITE_VERSION }}.ipa Payload
+            /usr/bin/zip -qry ../packages/YTLitePlus_light_${YT_VERSION}_${YTLITE_VERSION}.ipa Payload
             popd >/dev/null
-            echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
+            echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "ERROR: No IPA produced and no staged app found."
-          echo "package=" >> $GITHUB_OUTPUT
+          echo "package=" >> "$GITHUB_OUTPUT"
           exit 1
 
       - name: Upload Artifact
