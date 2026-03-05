@@ -26,10 +26,13 @@ jobs:
     permissions:
       contents: read
 
-    # Keep these active; everything else is renamed to .off inside YouTube.app.
-    # We added A/B config & sideload/“spoof” helpers and a couple of network/privacy helpers.
+    # ⬇️ Expanded whitelist:
+    # - Core: YTLitePlus, YTLite
+    # - AB/sideload helpers: YTAB, ABConfig, ABGoodies, Sideload, Spoof, VersionSpoofer
+    # - Network/privacy helpers used around login: NoTracking, NoCheckLocal
+    # - Low-risk UI/login-adjacent helpers: YouPiP, YTVideoOverlay, RememberCaption, Miniplayer, Speed, Shorts, DontEatMyContent
     env:
-      WHITELIST_REGEX: "YTLitePlus|YTLite|YTAB|ABConfig|ABGoodies|Sideload|Spoof|VersionSpoofer|NoTracking|NoCheckLocal"
+      WHITELIST_REGEX: "YTLitePlus|YTLite|YTAB|ABConfig|ABGoodies|Sideload|Spoof|VersionSpoofer|NoTracking|NoCheckLocal|YouPiP|YTVideoOverlay|RememberCaption|Miniplayer|Speed|Shorts|DontEatMyContent"
 
     steps:
       # 1) Toolchain -----------------------------------------------------------
