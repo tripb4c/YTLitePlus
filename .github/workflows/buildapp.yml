@@ -30,6 +30,7 @@ jobs:
     # right after Google login. We can add/remove names here in seconds.
     env:
       DISABLE_DYLIBS_REGEX: "libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       # 1) Toolchain -----------------------------------------------------------
