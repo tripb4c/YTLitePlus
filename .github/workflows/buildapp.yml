@@ -1,215 +1,57 @@
-name: Build YTLitePlus (Original + Prune Built IPA + Always Upload)
+name: Build YTLitePlus
 
 on:
   workflow_dispatch:
-    inputs:
-      sdk_version:
-        description: "iOS SDK Version"
-        default: "18.6"
-        required: true
-        type: string
-      decrypted_youtube_url:
-        description: "Direct URL to your ArmConverter decrypted YouTube IPA"
-        default: "https://example.com/YouTube_decrypted.ipa"
-        required: true
-        type: string
-      upload_artifact:
-        description: "Upload IPA as artifact"
-        default: true
-        required: false
-        type: boolean
 
 jobs:
   build:
-    name: Build YTLitePlus
-    runs-on: macos-15-intel
-    permissions:
-      contents: read
-
-    # Start tiny: only disable the two dylibs that most often cause the crash
-    # right after Google login. We can add/remove names here in seconds.
-    env:
-      DISABLE_DYLIBS_REGEX: "libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    runs-on: macos-latest
 
     steps:
-      # 1) Toolchain -----------------------------------------------------------
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
+    - name: Checkout repository
+      uses: actions/checkout@v3
 
-      - name: Install dependencies
-        run: brew install ldid dpkg make jq
+    - name: Install dependencies
+      run: |
+        brew install dpkg ldid theos jq
 
-      - name: Download Theos
-        uses: actions/checkout@v4
-        with:
-          repository: theos/theos
-          ref: 13c22376b5d83ff759c1993de0a861e673aa522b
-          path: theos
-          submodules: recursive
+    - name: Build (fetch tag via API, then make)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        DISABLE_DYLIBS_REGEX: "libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
 
-      - name: Cache iOS SDK
-        id: sdk
-        uses: actions/cache@v3
-        env:
-          cache-name: iOS-${{ inputs.sdk_version }}-SDK
-        with:
-          path: theos/sdks/
-          key: ${{ env.cache-name }}
-          restore-keys: ${{ env.cache-name }}
+      run: |
+        set -euxo pipefail
 
-      - name: Download iOS SDK (if cache miss)
-        if: steps.sdk.outputs.cache-hit != 'true'
-        env:
-          THEOS: ${{ github.workspace }}/theos
-        run: |
-          set -euxo pipefail
-          git clone -n --depth=1 --filter=tree:0 https://github.com/aricloverEXTRA/sdks/
-          cd sdks
-          git sparse-checkout set --no-cone "iPhoneOS${{ inputs.sdk_version }}.sdk"
-          git checkout
-          mkdir -p "$THEOS/sdks"
-          mv *.sdk "$THEOS/sdks"
+        echo "==> Fetching latest YTLite tag from GitHub API..."
 
-      - name: Download Theos Jailed
-        uses: actions/checkout@v4
-        with:
-          repository: qnblackcat/theos-jailed
-          ref: master
-          path: theos-jailed
-          submodules: recursive
+        YTLITE_VERSION=$(curl -sS --fail \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "User-Agent: YTLitePlus-CI" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          https://api.github.com/repos/YTLite/YTLite/releases/latest \
+          | jq -r '.tag_name')
 
-      - name: Install Theos Jailed
-        env:
-          THEOS: ${{ github.workspace }}/theos
-        run: |
-          set -euxo pipefail
-          ./theos-jailed/install
+        if [ -z "${YTLITE_VERSION}" ] || [ "${YTLITE_VERSION}" = "null" ]; then
+          echo "ERROR: Could not get latest YTLite version from GitHub API."
+          exit 1
+        fi
 
-      - name: Put GNU make in PATH
-        run: |
-          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
-          (echo 'export PATH="/usr/local/opt/make/libexec/gnubin:$PATH"' >> ~/.bash_profile)
-          source ~/.bash_profile || true
+        echo "Using YTLITE_VERSION=${YTLITE_VERSION}"
 
-      # 2) Bring in your decrypted IPA (untouched) ----------------------------
-      - name: Capture YT IPA URL
-        run: |
-          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' "$GITHUB_EVENT_PATH")"
-          echo "::add-mask::$URL_YT"
-          echo "URL_YT=$URL_YT" >> "$GITHUB_ENV"
+        export MAKEFLAGS=-j$(($(sysctl -n hw.ncpu)-1))
 
-      - name: Prepare YouTube IPA (no stripping, no plist edits)
-        run: |
-          set -euxo pipefail
-          mkdir -p tmp
-          if ! wget "$URL_YT" --quiet -O YouTube.ipa ; then
-            curl -L "$URL_YT" -o YouTube.ipa
-          fi
-          unzip -q YouTube.ipa -d tmp
-          # Capture version for artifact name (best-effort)
-          if /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist" >/dev/null 2>&1 ; then
-            ver=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "tmp/Payload/YouTube.app/Info.plist")
-            echo "YT_VERSION=$ver" >> "$GITHUB_ENV"
-          else
-            echo "YT_VERSION=unknown" >> "$GITHUB_ENV"
-          fi
+        rm -rf packages
+        mkdir -p packages
 
-      # 3) Build using the project's original Makefile ------------------------
-      - name: Build (original scheme; produce injected IPA)
-        id: theos_build
-        env:
-          THEOS: ${{ github.workspace }}/theos
-        run: |
-          set -euxo pipefail
-          export MAKEFLAGS=-j$(sysctl -n hw.ncpu)
-          rm -rf packages && mkdir -p packages
-          # Preserve original behavior; no Makefile sed; no PlugIns stripping
-          make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 | tee build.log || true
+        make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
+          YTLITE_VERSION="${YTLITE_VERSION}" | tee build.log
 
-          echo "==> packages/ (after make):"
-          ls -lah packages || true
-
-          if ls packages/*.ipa >/dev/null 2>&1; then
-            # This IPA contains the injected tweaks (we'll prune IN HERE)
-            echo "ipa_ready=1" >> "$GITHUB_OUTPUT"
-            echo "built_ipa=$(ls -t packages/*.ipa | head -n1)" >> "$GITHUB_OUTPUT"
-          else
-            echo "ipa_ready=0" >> "$GITHUB_OUTPUT"
-            echo "ERROR: No IPA produced by Theos"
-            exit 1
-          fi
-
-      # 4) Unzip the built (injected) IPA and prune inside it -----------------
-      - name: Unpack built IPA to work/ (this contains the injected dylibs)
-        run: |
-          set -euxo pipefail
-          rm -rf work && mkdir -p work
-          unzip -q "${{ steps.theos_build.outputs.built_ipa }}" -d work
-          test -d work/Payload/YouTube.app
-
-      - name: List injected dylibs (for visibility)
-        run: |
-          set -euxo pipefail
-          APPDIR="work/Payload/YouTube.app"
-          echo "==> Searching for dylibs under ${APPDIR}"
-          # Look in Frameworks (typical for theos-jailed) and anywhere else
-          find "$APPDIR" -type f -name "*.dylib" | sort | tee all_dylibs.txt || true
-          echo "==> otool -L main binary (to see load commands)"
-          otool -L "$APPDIR/YouTube" | sed 's/^/  /' || true
-          echo "==> otool -L any injected dylib (first 5 hits)"
-          head -n 5 all_dylibs.txt | while read -r f; do echo "---- $f"; otool -L "$f" || true; done
-
-      - name: Disable ONLY the known crashers (blacklist)
-        run: |
-          set -euxo pipefail
-          APPDIR="work/Payload/YouTube.app"
-          echo "==> DISABLE regex: ${DISABLE_DYLIBS_REGEX}"
-          if [ -s all_dylibs.txt ]; then
-            while IFS= read -r f; do
-              base="$(basename "$f")"
-              if echo "$base" | grep -Eq "${DISABLE_DYLIBS_REGEX}"; then
-                echo "DISABLE: $base"
-                mv "$f" "${f}.off"
-              else
-                echo "KEEP   : $base"
-              fi
-            done < all_dylibs.txt
-          else
-            echo "WARN: No *.dylib files found under ${APPDIR} (unexpected)."
-            echo "      If this happens, we may need to search non-*.dylib Mach-O in Frameworks."
-          fi
-          echo "==> Active dylibs after blacklist:"
-          find "$APPDIR" -type f -name "*.dylib" -print | sed 's/^/  /' || true
-
-      # 5) Repack from work/ so pruning actually applies ----------------------
-      - name: Package pruned IPA
-        id: package
-        run: |
-          set -euxo pipefail
-          mkdir -p packages
-          (cd work && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
-          ls -lah packages || true
-          echo "package=packages/YTLitePlus_pruned_${YT_VERSION}.ipa" >> "$GITHUB_OUTPUT"
-          echo "### Base YouTube Version: ${YT_VERSION}" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Disabled dylibs regex: ${DISABLE_DYLIBS_REGEX}" >> "$GITHUB_STEP_SUMMARY"
-          echo "### Artifact: YTLitePlus_pruned_${YT_VERSION}.ipa" >> "$GITHUB_STEP_SUMMARY"
-
-      # 6) Upload artifacts ----------------------------------------------------
-      - name: Upload IPA Artifact
-        if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: YTLitePlus_build_${{ env.YT_VERSION }}
-          path: ${{ steps.package.outputs.package }}
-          if-no-files-found: error
-
-      - name: Upload packages folder (diagnostic)
-        if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: packages_diagnostics_${{ env.YT_VERSION }}
-          path: packages/
-          if-no-files-found: warn
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ytliteplus-output
+        path: |
+          packages/
+          build.log
