@@ -107,16 +107,17 @@ jobs:
 
       - name: Download iOS SDK
         if: steps.SDK.outputs.cache-hit != 'true'
+        env:
+          THEOS: ${{ github.workspace }}/theos
+          SDK_VER: ${{ inputs.sdk_version }}
         run: |
-          # Only download the specific SDK version
+          set -euxo pipefail
           git clone -n --depth=1 --filter=tree:0 https://github.com/aricloverEXTRA/sdks/
           cd sdks
-          git sparse-checkout set --no-cone iPhoneOS${{ inputs.sdk_version }}.sdk
+          git sparse-checkout set --no-cone "iPhoneOS${SDK_VER}.sdk"
           git checkout
           mkdir -p "$THEOS/sdks"
           mv *.sdk "$THEOS/sdks"
-        env:
-          THEOS: ${{ github.workspace }}/theos
 
       - name: Download Theos Jailed
         uses: actions/checkout@v6.0.1
@@ -127,19 +128,20 @@ jobs:
           submodules: recursive
 
       - name: Install Theos Jailed
-        run: |
-          ./theos-jailed/install
         env:
           THEOS: ${{ github.workspace }}/theos
+        run: |
+          set -euxo pipefail
+          ./theos-jailed/install
 
       - name: Fix Compiling
+        env:
+          THEOS: ${{ github.workspace }}/theos
         run: |
-          # Update GNU Make to allow for faster building
+          set -euxo pipefail
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
           (echo export PATH="/usr/local/opt/make/libexec/gnubin:$PATH" >> ~/.bash_profile)
           source ~/.bash_profile
-        env:
-          THEOS: ${{ github.workspace }}/theos
 
       # === URL RESOLUTION WITH DROPDOWN (handles &amp; and forces Dropbox dl=1) ===
       - name: Resolve decrypted YouTube IPA URL (dropdown)
@@ -196,12 +198,10 @@ PY
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          # Download and unzip iPA
           curl -L --fail --retry 5 --retry-delay 3 \
             -H "User-Agent: YTLitePlus-CI" \
             "$YOUTUBE_URL" -o YouTube.ipa
 
-          # Ensure we didn't download an HTML page by mistake
           MIN_SIZE=$((10 * 1024 * 1024))
           ACT_SIZE=$(stat -f%z YouTube.ipa)
           if [ "$ACT_SIZE" -lt "$MIN_SIZE" ]; then
@@ -212,10 +212,8 @@ PY
 
           unzip -q YouTube.ipa -d tmp
 
-          # Get the YouTube app version from Info.plist
           echo "YT_VERSION=$(grep -A 1 '<key>CFBundleVersion</key>' tmp/Payload/YouTube.app/Info.plist | grep '<string>' | awk -F'[><]' '{print $3}')" >> "$GITHUB_ENV"
 
-          # Fetch the latest YTLite version from GitHub API (authenticated)
           YTLITE_VERSION=$(curl -sS --fail \
             -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "User-Agent: YTLitePlus-CI" \
@@ -231,11 +229,9 @@ PY
           echo "YTLITE_VERSION=$YTLITE_VERSION" >> "$GITHUB_ENV"
           echo "Fetched YTLite version: $YTLITE_VERSION"
 
-          # Remove contents that interfere with sideloading
           rm -rf tmp/Payload/YouTube.app/_CodeSignature/CodeResources
           rm -rf tmp/Payload/YouTube.app/PlugIns/*
 
-          # Modify Info.plist to remove UISupportedDevices
           python - <<'EOF'
           import plistlib
           filepath = 'tmp/Payload/YouTube.app/Info.plist'
@@ -246,7 +242,6 @@ PY
               plistlib.dump(plist, f)
           EOF
 
-          # Manually install the Open in YouTube extension
           cp -R Extensions/*.appex tmp/Payload/YouTube.app/PlugIns
 
       - name: Build Package
@@ -255,27 +250,28 @@ PY
           THEOS: ${{ github.workspace }}/theos
           BUNDLE_ID: ${{ inputs.bundle_id }}
           APP_NAME: ${{ inputs.app_name }}
+          SDK_VER: ${{ inputs.sdk_version }}
         run: |
           set -euxo pipefail
-          # Replace lines in Makefile based on inputs
-          sed -i '' "s/^BUNDLE_ID.*$/BUNDLE_ID = ${{ env.BUNDLE_ID }}/" Makefile
-          sed -i '' "s/^DISPLAY_NAME.*$/DISPLAY_NAME = ${{ env.APP_NAME }}/" Makefile
-          sed -i '' "s/^PACKAGE_VERSION.*$/PACKAGE_VERSION = ${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }}/" Makefile
-          sed -i '' "s/^export TARGET.*$/export TARGET = iphone:clang:${{ inputs.sdk_version }}:14.0/" Makefile
-          sed -i '' "s|^export SDK_PATH.*$|export SDK_PATH = \$(THEOS)/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/|" Makefile
+
+          # Replace lines in Makefile based on inputs (use env vars instead of inline ${{ ... }})
+          sed -i '' "s/^BUNDLE_ID.*$/BUNDLE_ID = ${BUNDLE_ID}/" Makefile
+          sed -i '' "s/^DISPLAY_NAME.*$/DISPLAY_NAME = ${APP_NAME}/" Makefile
+          sed -i '' "s/^PACKAGE_VERSION.*$/PACKAGE_VERSION = ${YT_VERSION}-${YTLITE_VERSION}/" Makefile
+          sed -i '' "s/^export TARGET.*$/export TARGET = iphone:clang:${SDK_VER}:14.0/" Makefile
+          sed -i '' "s|^export SDK_PATH.*$|export SDK_PATH = \$(THEOS)/sdks/iPhoneOS${SDK_VER}.sdk/|" Makefile
 
           # Build the package
-          make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 YTLITE_VERSION=${{ env.YTLITE_VERSION }}
+          make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 YTLITE_VERSION="${YTLITE_VERSION}"
 
           # Rename the package based on the version
-          (mv "packages/$(ls -t packages | head -n1)" "packages/YTLitePlus_${{ env.YT_VERSION }}_${{ env.YTLITE_VERSION }}.ipa")
-
-          # Pass package name to the upload step
+          mv "packages/$(ls -t packages | head -n1)" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}}.ipa" || true
+          # If the line above failed (because name already matches), keep the latest name
           echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
 
           # Print hash and bundle ID
           echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
-          echo "==> Bundle ID: ${{ env.BUNDLE_ID }}"
+          echo "==> Bundle ID: ${BUNDLE_ID}"
 
       - name: Upload Artifact
         if: ${{ inputs.upload_artifact }}
@@ -288,7 +284,7 @@ PY
       - name: Upload Artifact to Catbox and update AltStore repo
         if: ${{ inputs.catbox_upload }}
         env:
-          CATBOX_FILE: ""
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         run: |
           set -euxo pipefail
           RESPONSE=$(curl -F "reqtype=fileupload" -F "fileToUpload=@packages/${{ steps.build_package.outputs.package }}" https://catbox.moe/user/api.php)
@@ -302,15 +298,15 @@ PY
           echo "CATBOX_FILE=$CATBOX_FILE" >> "$GITHUB_ENV"
           echo "CATBOX_URL=$CATBOX_URL" >> "$GITHUB_ENV"
 
-          # Trigger Altstore source update via GitHub API using jq to build JSON
+          # Build JSON with jq to avoid YAML quoting issues
           jq -n \
             --arg ref "main" \
             --arg url "$CATBOX_URL" \
-            --arg ylp "${{ env.YTLITE_VERSION }}" \
-            --arg yv "${{ env.YT_VERSION }}" \
+            --arg ylp "${YTLITE_VERSION}" \
+            --arg yv "${YT_VERSION}" \
             '{ref:$ref, inputs:{yt_lite_plus_url:$url, yt_lite_plus_version:$ylp, yt_version:$yv}}' \
           | curl -sS -X POST \
-              -H "Authorization: token ${{ secrets.PERSONAL_ACCESS_TOKEN }}" \
+              -H "Authorization: token ${PERSONAL_ACCESS_TOKEN}" \
               -H "Content-Type: application/json" \
               --data-binary @- \
               "https://api.github.com/repos/Balackburn/YTLitePlusAltstore/actions/workflows/update_source.yml/dispatches"
@@ -319,7 +315,7 @@ PY
         if: ${{ inputs.create_release }}
         run: |
           TODAY=$(date '+%Y-%m-%d')
-          sed "s/%ytliteplus_version%/${{ env.YTLITE_VERSION }}/g; s/%youtube_version%/${{ env.YT_VERSION }}/g; s/%catbox_url%/${{ env.CATBOX_FILE }}/g; s/%date%/$TODAY/g" \
+          sed "s/%ytliteplus_version%/${YTLITE_VERSION}/g; s/%youtube_version%/${YT_VERSION}/g; s/%catbox_url%/${CATBOX_FILE}/g; s/%date%/$TODAY/g" \
             .github/RELEASE_TEMPLATE/Release.md > release_notes.md
 
       - name: Create Draft Release
