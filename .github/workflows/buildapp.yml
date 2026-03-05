@@ -26,9 +26,10 @@ jobs:
     permissions:
       contents: read
 
-    # Keep these active; everything else is renamed to .off inside YouTube.app
+    # Keep these active; everything else is renamed to .off inside YouTube.app.
+    # We added A/B config & sideload/“spoof” helpers and a couple of network/privacy helpers.
     env:
-      WHITELIST_REGEX: "YTLitePlus|YTLite|YTAB"
+      WHITELIST_REGEX: "YTLitePlus|YTLite|YTAB|ABConfig|ABGoodies|Sideload|Spoof|VersionSpoofer|NoTracking|NoCheckLocal"
 
     steps:
       # 1) Toolchain -----------------------------------------------------------
@@ -195,7 +196,7 @@ jobs:
           mkdir -p packages
 
           if [ "${{ steps.theos_build.outputs.ipa_ready }}" = "1" ]; then
-            # We'll prefer the pruned-from-stage output so the whitelist applies
+            # Prefer the pruned-from-stage output so the whitelist applies
             if [ -d "tmp/Payload/YouTube.app" ]; then
               (cd tmp && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
               FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
