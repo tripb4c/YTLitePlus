@@ -97,8 +97,8 @@ jobs:
           cache-name: iOS-${{ inputs.sdk_version }}-SDK
         with:
           path: theos/sdks/
-          key: ${{ env.cache-name }}
-          restore-keys: ${{ env.cache-name }}
+          key: ${{ env['cache-name'] }}
+          restore-keys: ${{ env['cache-name'] }}
 
       - name: Download iOS SDK
         if: steps.SDK.outputs.cache-hit != 'true'
@@ -164,7 +164,6 @@ jobs:
           fi
 
           # --- Fix 1: Unescape HTML entities commonly seen when pasting from notes/editors
-          # Convert '&amp;' back to '&' BEFORE any query param logic
           RESOLVED_URL="${RESOLVED_URL//&amp;/&}"
 
           # --- Fix 2: Normalize Dropbox to a single dl=1 (force direct download)
@@ -268,8 +267,8 @@ PY
           echo "package=$(ls -t packages | head -n1)" >> $GITHUB_OUTPUT
 
           # Print out the hash and bundle ID
-          echo -e "==> \033[1mSHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')\033[0m"
-          echo -e "==> \033[1mBundle ID: ${{ env.BUNDLE_ID }}\033[0m"
+          echo -e "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
+          echo -e "==> Bundle ID: ${{ env.BUNDLE_ID }}"
         env:
           THEOS: ${{ github.workspace }}/theos
           BUNDLE_ID: ${{ inputs.bundle_id }}
@@ -331,21 +330,27 @@ PY
 
       - name: Job Summary
         run: |
-          echo -e '### 📺 Build Complete' >> $GITHUB_STEP_SUMMARY
+          echo '### Build Complete' >> $GITHUB_STEP_SUMMARY
 
       - name: Job Summary - Artifact Upload
         if: ${{ inputs.upload_artifact }}
         run: |
-          echo -e '### 📦 Artifact Upload\n\nThe artifact was uploaded successfully! Refresh and [scroll down](#artifacts) to view the artifact. Note that you must be signed in to GitHub to download it.' >> $GITHUB_STEP_SUMMARY
+          echo '### Artifact Upload' >> $GITHUB_STEP_SUMMARY
+          echo '' >> $GITHUB_STEP_SUMMARY
+          echo 'The artifact was uploaded successfully! Open the run and scroll to the "Artifacts" section to download it.' >> $GITHUB_STEP_SUMMARY
 
       - name: Job Summary - Catbox Upload
         if: ${{ inputs.catbox_upload}}
         run: |
-          echo -e '### 🐱 Catbox Upload\n\nThe Catbox upload was successful! Here is a permanent shareable link: '"$CATBOX_URL" >> $GITHUB_STEP_SUMMARY
+          echo "### Catbox Upload" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The Catbox upload was successful! Permanent link: ${CATBOX_URL}" >> $GITHUB_STEP_SUMMARY
 
       - name: Job Summary - Draft Release
         if: ${{ inputs.create_release }}
         run: |
           REPO_URL="https://github.com/${{ github.repository }}"
           RELEASES_URL="$REPO_URL/releases"
-          echo -e '### 🚀 Draft Release\n\nThe release draft has been created successfully! You can view your releases here: '"$RELEASES_URL" >> $GITHUB_STEP_SUMMARY
+          echo "### Draft Release" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "The release draft has been created successfully! View your releases here: ${RELEASES_URL}" >> $GITHUB_STEP_SUMMARY
