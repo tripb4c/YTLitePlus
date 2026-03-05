@@ -9,49 +9,103 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v4
 
     - name: Install dependencies
       run: |
-        brew install dpkg ldid theos jq
+        set -euxo pipefail
+        # theos via brew is often a meta formula; ensure required CLIs are present
+        brew install dpkg ldid jq curl unzip || true
 
-    - name: Build (fetch tag via API, then make)
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        DISABLE_DYLIBS_REGEX: "libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
-
+    # ⬇️ Put your Dropbox DIRECT download link here (end with ?dl=1)
+    - name: Configure decrypted IPA URL
+      id: cfg
       run: |
         set -euxo pipefail
+        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        # REPLACE THIS URL WITH YOUR OWN DROPBOX LINK (use ?dl=1 for direct dl)
+        DECRYPTED_IPA_URL="https://www.dropbox.com/s/XXXXX/YouTube_decrypted.ipa?dl=1"
+        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+        echo "DECRYPTED_IPA_URL=${DECRYPTED_IPA_URL}" >> "$GITHUB_OUTPUT"
 
-        echo "==> Fetching latest YTLite tag from GitHub API..."
+    - name: Download decrypted YouTube IPA from Dropbox
+      env:
+        URL: ${{ steps.cfg.outputs.DECRYPTED_IPA_URL }}
+      run: |
+        set -euxo pipefail
+        mkdir -p tmp
+        # Force direct download (-L follows redirects)
+        curl -L --fail --retry 5 --retry-delay 3 \
+          -H "User-Agent: YTLitePlus-CI" \
+          "$URL" -o tmp/YouTube.ipa
 
-        YTLITE_VERSION=$(curl -sS --fail \
+        # Quick sanity check: IPA is just a zip
+        file tmp/YouTube.ipa || true
+        # Basic size check > 10 MB to avoid HTML download by mistake
+        MIN_SIZE=$((10 * 1024 * 1024))
+        ACT_SIZE=$(stat -f%z tmp/YouTube.ipa)
+        if [ "$ACT_SIZE" -lt "$MIN_SIZE" ]; then
+          echo "Downloaded file is too small ($ACT_SIZE bytes)."
+          echo "Most likely you copied a sharing page (HTML) instead of the direct file."
+          echo "Make sure your Dropbox link ends with ?dl=1."
+          exit 1
+        fi
+
+    - name: Extract decrypted IPA into tmp/Payload/YouTube.app
+      run: |
+        set -euxo pipefail
+        rm -rf tmp/Payload
+        unzip -q tmp/YouTube.ipa -d tmp
+        test -d tmp/Payload/YouTube.app || { echo "YouTube.app not found after extraction"; ls -lah tmp; exit 1; }
+
+    - name: Fetch latest YTLite tag (via GitHub API)
+      id: ytlite
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        set -euxo pipefail
+        TAG=$(curl -sS --fail \
           -H "Authorization: Bearer ${GITHUB_TOKEN}" \
           -H "User-Agent: YTLitePlus-CI" \
           -H "Accept: application/vnd.github+json" \
           -H "X-GitHub-Api-Version: 2022-11-28" \
           https://api.github.com/repos/YTLite/YTLite/releases/latest \
           | jq -r '.tag_name')
+        [ -n "$TAG" ] && [ "$TAG" != "null" ] || { echo "Could not resolve YTLite latest tag"; exit 1; }
+        echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+        echo "Using YTLITE_VERSION=$TAG"
 
-        if [ -z "${YTLITE_VERSION}" ] || [ "${YTLITE_VERSION}" = "null" ]; then
-          echo "ERROR: Could not get latest YTLite version from GitHub API."
-          exit 1
-        fi
+    - name: Build (inject tweaks + package)
+      env:
+        # Auth token for API calls inside any helper scripts (if used)
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # Your pruning filter (disable known crashy tweaks if needed)
+        DISABLE_DYLIBS_REGEX: "libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
+      run: |
+        set -euxo pipefail
 
-        echo "Using YTLITE_VERSION=${YTLITE_VERSION}"
-
+        # Speed up make by leaving 1 core free
         export MAKEFLAGS=-j$(($(sysctl -n hw.ncpu)-1))
 
-        rm -rf packages
-        mkdir -p packages
+        # Ensure theos output dir exists and packages/ is clean
+        rm -rf packages && mkdir -p packages
 
+        # The build tools typically expect the decrypted app at tmp/Payload/YouTube.app
+        # We've already put it there by unzipping the Dropbox IPA in the previous step.
+
+        # Call make and pass the resolved YTLite version to bypass any internal API fetch
         make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
-          YTLITE_VERSION="${YTLITE_VERSION}" | tee build.log
+          YTLITE_VERSION="${{ steps.ytlite.outputs.tag }}" | tee build.log
 
-    - name: Upload build artifacts
+        # Verify an IPA exists
+        ls -lah packages || true
+        ls packages/*.ipa >/dev/null 2>&1 || { echo "ERROR: No IPA produced by Theos"; exit 1; }
+
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ytliteplus-output
         path: |
           packages/
           build.log
+          tmp/Payload/YouTube.app/**
