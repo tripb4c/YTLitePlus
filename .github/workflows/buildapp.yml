@@ -2,6 +2,19 @@ name: Build YTLitePlus
 
 on:
   workflow_dispatch:
+    inputs:
+      ipa_source:
+        description: "Choose where to get the decrypted YouTube IPA URL"
+        required: true
+        type: choice
+        options:
+          - Use secret (DROPBOX_IPA_URL)
+          - Paste URL now
+        default: Use secret (DROPBOX_IPA_URL)
+      custom_url:
+        description: "If 'Paste URL now', enter your Dropbox direct link (must end with ?dl=1)"
+        required: false
+        type: string
 
 jobs:
   build:
@@ -14,51 +27,76 @@ jobs:
     - name: Install dependencies
       run: |
         set -euxo pipefail
-        # theos via brew is often a meta formula; ensure required CLIs are present
         brew install dpkg ldid jq curl unzip || true
 
-    # ⬇️ Put your Dropbox DIRECT download link here (end with ?dl=1)
-    - name: Configure decrypted IPA URL
-      id: cfg
-      run: |
-        set -euxo pipefail
-        # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-        # REPLACE THIS URL WITH YOUR OWN DROPBOX LINK (use ?dl=1 for direct dl)
-        DECRYPTED_IPA_URL="https://www.dropbox.com/s/XXXXX/YouTube_decrypted.ipa?dl=1"
-        # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-        echo "DECRYPTED_IPA_URL=${DECRYPTED_IPA_URL}" >> "$GITHUB_OUTPUT"
-
-    - name: Download decrypted YouTube IPA from Dropbox
+    - name: Resolve decrypted IPA URL
+      id: resolve_url
       env:
-        URL: ${{ steps.cfg.outputs.DECRYPTED_IPA_URL }}
+        INPUT_CHOICE: ${{ github.event.inputs.ipa_source }}
+        INPUT_URL: ${{ github.event.inputs.custom_url }}
+        SECRET_URL: ${{ secrets.DROPBOX_IPA_URL }}
+      run: |
+        set -euo pipefail
+
+        echo "Choice: ${INPUT_CHOICE}"
+
+        # Select source based on dropdown
+        if [[ "${INPUT_CHOICE}" == "Use secret (DROPBOX_IPA_URL)" ]]; then
+          if [[ -z "${SECRET_URL:-}" ]]; then
+            echo "Missing secret DROPBOX_IPA_URL. Add it under Repo Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          URL="${SECRET_URL}"
+        else
+          if [[ -z "${INPUT_URL:-}" ]]; then
+            echo "You chose 'Paste URL now' but did not provide custom_url."
+            exit 1
+          fi
+          URL="${INPUT_URL}"
+        fi
+
+        # Force Dropbox direct download if needed
+        if [[ "${URL}" =~ ^https?://www\.dropbox\.com/ ]] && [[ ! "${URL}" =~ \?dl=1$ ]]; then
+          if [[ "${URL}" =~ \?dl=0$ ]]; then
+            URL="${URL%?dl=0}?dl=1"
+          elif [[ "${URL}" =~ \?dl= ]]; then
+            # Keep existing params, append &dl=1
+            URL="${URL}&dl=1"
+          else
+            URL="${URL}?dl=1"
+          fi
+        fi
+
+        echo "Resolved URL (masked in logs)."
+        echo "DECRYPTED_IPA_URL=${URL}" >> "$GITHUB_OUTPUT"
+
+    - name: Download decrypted YouTube IPA
+      env:
+        URL: ${{ steps.resolve_url.outputs.DECRYPTED_IPA_URL }}
       run: |
         set -euxo pipefail
         mkdir -p tmp
-        # Force direct download (-L follows redirects)
         curl -L --fail --retry 5 --retry-delay 3 \
           -H "User-Agent: YTLitePlus-CI" \
           "$URL" -o tmp/YouTube.ipa
 
-        # Quick sanity check: IPA is just a zip
-        file tmp/YouTube.ipa || true
-        # Basic size check > 10 MB to avoid HTML download by mistake
+        # Sanity check: IPA is a zip and not an HTML page
         MIN_SIZE=$((10 * 1024 * 1024))
         ACT_SIZE=$(stat -f%z tmp/YouTube.ipa)
         if [ "$ACT_SIZE" -lt "$MIN_SIZE" ]; then
-          echo "Downloaded file is too small ($ACT_SIZE bytes)."
-          echo "Most likely you copied a sharing page (HTML) instead of the direct file."
-          echo "Make sure your Dropbox link ends with ?dl=1."
+          echo "Downloaded file looks too small ($ACT_SIZE bytes)."
+          echo "If using Dropbox, ensure the link ends with ?dl=1."
           exit 1
         fi
 
-    - name: Extract decrypted IPA into tmp/Payload/YouTube.app
+    - name: Extract IPA into tmp/Payload/YouTube.app
       run: |
         set -euxo pipefail
         rm -rf tmp/Payload
         unzip -q tmp/YouTube.ipa -d tmp
-        test -d tmp/Payload/YouTube.app || { echo "YouTube.app not found after extraction"; ls -lah tmp; exit 1; }
+        test -d tmp/Payload/YouTube.app || { echo "YouTube.app not found in IPA"; ls -lah tmp; exit 1; }
 
-    - name: Fetch latest YTLite tag (via GitHub API)
+    - name: Fetch latest YTLite tag (GitHub API)
       id: ytlite
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -77,27 +115,17 @@ jobs:
 
     - name: Build (inject tweaks + package)
       env:
-        # Auth token for API calls inside any helper scripts (if used)
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        # Your pruning filter (disable known crashy tweaks if needed)
         DISABLE_DYLIBS_REGEX: "libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
       run: |
         set -euxo pipefail
-
-        # Speed up make by leaving 1 core free
         export MAKEFLAGS=-j$(($(sysctl -n hw.ncpu)-1))
-
-        # Ensure theos output dir exists and packages/ is clean
         rm -rf packages && mkdir -p packages
 
-        # The build tools typically expect the decrypted app at tmp/Payload/YouTube.app
-        # We've already put it there by unzipping the Dropbox IPA in the previous step.
-
-        # Call make and pass the resolved YTLite version to bypass any internal API fetch
+        # Build with the resolved YTLite version
         make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
           YTLITE_VERSION="${{ steps.ytlite.outputs.tag }}" | tee build.log
 
-        # Verify an IPA exists
         ls -lah packages || true
         ls packages/*.ipa >/dev/null 2>&1 || { echo "ERROR: No IPA produced by Theos"; exit 1; }
 
