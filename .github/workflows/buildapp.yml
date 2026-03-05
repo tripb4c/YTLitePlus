@@ -22,7 +22,7 @@ on:
 jobs:
   build:
     name: Build YTLitePlus
-    runs-on: macos-latest
+    runs-on: macos-15
     permissions:
       contents: read
 
