@@ -26,9 +26,9 @@ jobs:
     permissions:
       contents: read
 
-    # Keep this minimal. Start with core only; add items (e.g., |YTAB, |YouPiP) one at a time.
+    # Keep these active; everything else is renamed to .off inside YouTube.app
     env:
-      WHITELIST_REGEX: "YTLitePlus|YTLite"
+      WHITELIST_REGEX: "YTLitePlus|YTLite|YTAB"
 
     steps:
       # 1) Toolchain -----------------------------------------------------------
@@ -124,7 +124,7 @@ jobs:
           set -euxo pipefail
           export MAKEFLAGS=-j$(sysctl -n hw.ncpu)
           rm -rf packages && mkdir -p packages
-          # Do NOT edit Makefile or strip PlugIns; preserve original behavior
+          # Preserve original behavior; no Makefile sed; no PlugIns stripping
           make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 | tee build.log || true
 
           echo "==> packages/ (after make):"
@@ -151,7 +151,6 @@ jobs:
             APPDIR="tmp/Payload/YouTube.app"
           fi
           if [ -d ".theos/staging/Applications/YouTube.app" ]; then
-            # prefer staged over base if present
             APPDIR=".theos/staging/Applications/YouTube.app"
           fi
           echo "APPDIR=$APPDIR" >> "$GITHUB_ENV"
@@ -195,10 +194,8 @@ jobs:
           set -euxo pipefail
           mkdir -p packages
 
-          # A) If Theos already produced an IPA, prefer that but also create a pruned IPA from stage.
           if [ "${{ steps.theos_build.outputs.ipa_ready }}" = "1" ]; then
-            echo "Theos built IPA: ${{ steps.theos_build.outputs.built_ipa }}"
-            # Try to also zip the staged (pruned) Payload to ensure whitelist takes effect
+            # We'll prefer the pruned-from-stage output so the whitelist applies
             if [ -d "tmp/Payload/YouTube.app" ]; then
               (cd tmp && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
               FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
@@ -212,7 +209,6 @@ jobs:
               FINAL="${{ steps.theos_build.outputs.built_ipa }}"
             fi
           else
-            # B) No IPA from Theos; zip staged Payload
             if [ -d "tmp/Payload/YouTube.app" ]; then
               (cd tmp && /usr/bin/zip -qry ../packages/YTLitePlus_pruned_${YT_VERSION}.ipa Payload)
               FINAL="packages/YTLitePlus_pruned_${YT_VERSION}.ipa"
@@ -235,7 +231,6 @@ jobs:
           echo "### Whitelist regex: ${WHITELIST_REGEX}" >> "$GITHUB_STEP_SUMMARY"
           echo "### Artifact: ${FINAL}" >> "$GITHUB_STEP_SUMMARY"
 
-      # 7) Upload IPA (and, if needed, the whole directory for debugging) -----
       - name: Upload IPA Artifact
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v4
