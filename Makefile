@@ -1,3 +1,5 @@
+# --- BEGIN: Overwrite Makefile safely (tabs preserved) ---
+cat > Makefile <<'MAKE'
 # ===== Theos / Target toolchain =====
 export TARGET      = iphone:clang:18.6:14.0
 export SDK_PATH    = $(THEOS)/sdks/iPhoneOS18.6.sdk/
@@ -16,9 +18,9 @@ export ADDITIONAL_CFLAGS = -I$(THEOS_PROJECT_DIR)/Tweaks/RemoteLog -I$(THEOS_PRO
 
 # ===== Project identifiers (workflow patches these with sed) =====
 PACKAGE_NAME     = YTLitePlus
-PACKAGE_VERSION  = X.X.X-X.X      # workflow overwrites to ${YT_VERSION}-${YTLITE_VERSION}
-DISPLAY_NAME     = YouTube        # workflow overwrites
-BUNDLE_ID        = com.google.ios.youtube  # workflow overwrites
+PACKAGE_VERSION  = X.X.X-X.X
+DISPLAY_NAME     = YouTube
+BUNDLE_ID        = com.google.ios.youtube
 
 INSTALL_TARGET_PROCESSES = YouTube
 
@@ -32,7 +34,7 @@ YTLitePlus_FILES = \
     YTLitePlus.xm \
     $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
 
-# Optional safe mode (Core-Lite): pass SKIP_CORE_FILES="Source/Themes.xm Source/VersionSpooferLite.xm"
+# Optional safe mode (Core-Lite): set SKIP_CORE_FILES to a space-separated list (we pass it from CI)
 YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
 
 # Build flags
@@ -105,7 +107,7 @@ YTLITE_BUNDLE  := $(YTLITE_PATH)/var/jb/Library/Application\ Support/YTLite.bund
 internal-clean::
     @rm -rf "$(YTLITE_PATH)"/*
 
-# Always run; shell decides what to do
+# Always run; shell decides what to do (NOTE: recipe lines begin with TAB)
 before-all::
     @mkdir -p "$(YTLITE_PATH)"; \
     if [ ! -f "$(YTLITE_DEB)" ]; then \
@@ -130,3 +132,13 @@ before-package::
             echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
         done; \
     fi
+MAKE
+# --- END: Overwrite Makefile safely ---
+
+# Show Makefile with visible TABs (just for troubleshooting once)
+# sed -n '1,140p' Makefile | sed -e $'s/\t/[TAB]\t/g' | nl
+
+# Build with Core-Lite on first pass (skip early/fragile hooks)
+make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
+  YTLITE_VERSION="${YTLITE_VERSION}" \
+  SKIP_CORE_FILES="Source/Themes.xm Source/VersionSpooferLite.xm"
