@@ -120,9 +120,9 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: qnblackcat/theos-jailed
-        ref: master
-        path: theos-jailed
-        submodules: recursive
+          ref: master
+          path: theos-jailed
+          submodules: recursive
 
       - name: Install Theos Jailed
         run: |
