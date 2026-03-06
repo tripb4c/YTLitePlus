@@ -105,7 +105,7 @@ jobs:
           path: theos/sdks/
           key: iphoneos-${{ inputs.sdk_version }}-sdk
 
-      # 5) Fetch SDK if cache missed
+      # 5) Fetch iOS SDK if cache missed
       - name: Fetch iOS SDK (if cache missed)
         if: steps.sdk_cache.outputs.cache-hit != 'true'
         run: |
@@ -138,7 +138,9 @@ jobs:
         run: |
           set -euo pipefail
           RAW="${{ inputs.decrypted_youtube_url }}"
+          # Unescape &amp; -> &
           RAW="${RAW//&amp;/&}"
+          # Dropbox: keep all params and force dl=1
           if [[ "$RAW" =~ ^https?://www\.dropbox\.com/ ]]; then
             if [[ "$RAW" == *\?* ]]; then
               if [[ "$RAW" =~ ([\?&])dl= ]]; then
@@ -276,8 +278,8 @@ jobs:
             echo "::notice title=Disabled dylibs regex::$DISABLE"
           fi
 
-      # 11) Build using sidecar Makefile.ci (TAB recipes preserved)
-      - name: Build Package (sidecar Makefile.ci; no repo Makefile)
+      # 11) Build using sidecar Makefile.ci (marker -> TAB conversion)
+      - name: Build Package (sidecar Makefile.ci; tab-safe)
         shell: bash
         run: |
           set -euxo pipefail
@@ -288,7 +290,7 @@ jobs:
             exit 1
           fi
 
-          # Write Makefile.ci (recipe lines below begin with a real TAB)
+          # Write Makefile.ci with a __TAB__ marker, then convert markers to real TABs
           cat > Makefile.ci <<'MAKE'
           export TARGET ?= iphone:clang:18.6:14.0
           export SDK_PATH ?= $(THEOS)/sdks/iPhoneOS18.6.sdk/
@@ -310,8 +312,8 @@ jobs:
           TWEAK_NAME = YTLitePlus
 
           YTLitePlus_FILES = \
-              YTLitePlus.xm \
-              $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
+          __TAB__YTLitePlus.xm \
+          __TAB__$(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
 
           YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
 
@@ -319,16 +321,16 @@ jobs:
           YTLitePlus_FRAMEWORKS = UIKit Security
 
           YTLitePlus_INJECT_DYLIBS = \
-              Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib \
-              .theos/obj/libFLEX.dylib \
-              .theos/obj/YTUHD.dylib \
-              .theos/obj/YouPiP.dylib \
-              .theos/obj/YouTubeDislikesReturn.dylib \
-              .theos/obj/YTABConfig.dylib \
-              .theos/obj/DontEatMyContent.dylib \
-              .theos/obj/YTVideoOverlay.dylib \
-              .theos/obj/YouTimeStamp.dylib \
-              .theos/obj/YouGroupSettings.dylib
+          __TAB__Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib \
+          __TAB__.theos/obj/libFLEX.dylib \
+          __TAB__.theos/obj/YTUHD.dylib \
+          __TAB__.theos/obj/YouPiP.dylib \
+          __TAB__.theos/obj/YouTubeDislikesReturn.dylib \
+          __TAB__.theos/obj/YTABConfig.dylib \
+          __TAB__.theos/obj/DontEatMyContent.dylib \
+          __TAB__.theos/obj/YTVideoOverlay.dylib \
+          __TAB__.theos/obj/YouTimeStamp.dylib \
+          __TAB__.theos/obj/YouGroupSettings.dylib
 
           YTLitePlus_EMBED_LIBRARIES  = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
           YTLitePlus_EMBED_FRAMEWORKS = $(_THEOS_LOCAL_DATA_DIR)/$(_THEOS_OBJ_DIR_NAME)/install_Alderis.xcarchive/Products/var/jb/Library/Frameworks/Alderis.framework
@@ -353,32 +355,40 @@ jobs:
           YTLITE_BUNDLE := $(YTLITE_PATH)/var/jb/Library/Application\ Support/YTLite.bundle
 
           internal-clean::
-              @rm -rf "$(YTLITE_PATH)"/*
+          __TAB__@rm -rf "$(YTLITE_PATH)"/*
 
           before-all::
-              @mkdir -p "$(YTLITE_PATH)"; \
-              if [ ! -f "$(YTLITE_DEB)" ]; then \
-                  echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
-              fi; \
-              if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-                  tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
-                  tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
-                  if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-                      echo "==> Failed to extract YTLite"; exit 1; \
-                  fi; \
-              fi
+          __TAB__@mkdir -p "$(YTLITE_PATH)"; \
+          __TAB__if [ ! -f "$(YTLITE_DEB)" ]; then \
+          __TAB__  echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
+          __TAB__fi; \
+          __TAB__if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
+          __TAB__  tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
+          __TAB__  tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
+          __TAB__  if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
+          __TAB__    echo "==> Failed to extract YTLite"; exit 1; \
+          __TAB__  fi; \
+          __TAB__fi
 
           before-package::
-              @if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
-                  echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
-                  find .theos -type f -name "*.dylib" | while read f; do \
-                      echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
-                  done; \
-              fi
+          __TAB__@if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
+          __TAB__  echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
+          __TAB__  find .theos -type f -name "*.dylib" | while read f; do \
+          __TAB__    echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
+          __TAB__  done; \
+          __TAB__fi
           MAKE
 
-          # Optional peek to confirm tabs
-          sed -n '1,80p' Makefile.ci | nl
+          # Convert markers to literal TABs so make sees valid recipes
+          python3 - <<'PY'
+import io, sys
+p="Makefile.ci"
+s=open(p,"r",encoding="utf-8").read().replace("__TAB__","\t")
+open(p,"w",encoding="utf-8").write(s)
+PY
+
+          # Optional peek to confirm tabs (recipe lines will start with a literal TAB)
+          sed -n '1,90p' Makefile.ci | nl
 
           # Core mode skip list
           if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
