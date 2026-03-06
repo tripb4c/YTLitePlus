@@ -402,51 +402,35 @@ jobs:
           if-no-files-found: error
 
       - name: Optional: Upload to Catbox
-  if: ${{ inputs.catbox_upload }}
-  shell: bash
-  run: |
-    set -euxo pipefail
+        if: ${{ inputs.catbox_upload }}
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-    FILE="packages/$(ls -t packages | head -n1)"
-    if [ ! -f "$FILE" ]; then
-      echo "::error::No IPA found in packages/"
-      exit 1
-    fi
+          FILE="packages/$(ls -t packages | head -n1)"
+          if [ ! -f "$FILE" ]; then
+            echo "::error::No IPA found in packages/"
+            exit 1
+          fi
 
-    # Upload to Catbox
-    RESPONSE=$(curl -sS \
-      -F "reqtype=fileupload" \
-      -F "fileToUpload=@${FILE}" \
-      https://catbox.moe/user/api.php)
+          # Upload to Catbox
+          RESPONSE="$(curl -sS \
+            -F reqtype=fileupload \
+            -F fileToUpload=@"${FILE}" \
+            https://catbox.moe/user/api.php)"
 
-    # Extract the URL from response
-    CATBOX_URL=$(printf '%s' "$RESPONSE" | grep -Eo 'https://files\.catbox\.moe/[^"]+' || true)
+          # Extract URL
+          CATBOX_URL="$(printf '%s' "$RESPONSE" | grep -Eo 'https://files\.catbox\.moe/[^"]+' || true)"
 
-    if [ -z "$CATBOX_URL" ]; then
-      echo "::error::Catbox upload did not return a valid URL."
-      echo "Response was: $RESPONSE"
-      exit 1
-    fi
+          if [ -z "$CATBOX_URL" ]; then
+            echo "::error::Catbox upload did not return a valid URL."
+            echo "Response was: $RESPONSE"
+            exit 1
+          fi
 
-    # Export to env for later steps and show a notice
-    echo "CATBOX_URL=$CATBOX_URL" >> "$GITHUB_ENV"
-    echo "::notice title=Catbox::${CATBOX_URL}"
+          echo "CATBOX_URL=$CATBOX_URL" >> "$GITHUB_ENV"
+          echo "::notice title=Catbox::${CATBOX_URL}"
 
-      - name: Create Draft GitHub Release
-        if: ${{ inputs.create_release }}
-        uses: softprops/action-gh-release@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }}
-          name: v${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }} - YTLitePlus
-          draft: true
-          files: packages/*.ipa
-          body: |
-            YouTube (CFBundleVersion): ${{ env.YT_VERSION }}
-            YTLite tag: ${{ env.YTLITE_VERSION }}
-            Core Mode: ${{ inputs.core_mode }}
-            Disable Profile: ${{ inputs.disable_profile }}
 
       - name: Job Summary
         shell: bash
