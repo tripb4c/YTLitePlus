@@ -73,22 +73,18 @@ jobs:
       THEOS: ${{ github.workspace }}/theos
 
     steps:
-      # 1) Your repo
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2) Tooling
       - name: Install build dependencies
         run: |
           set -euxo pipefail
           brew update
           brew install jq curl unzip ldid dpkg gnu-sed make
-          # Put GNU make 'gnubin' first so 'make' is GNU make
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
-      # 3) Theos (pinned revision)
       - name: Download Theos
         uses: actions/checkout@v4
         with:
@@ -97,7 +93,6 @@ jobs:
           path: theos
           submodules: recursive
 
-      # 4) Cache SDK
       - name: Cache iOS SDK
         id: sdk_cache
         uses: actions/cache@v4
@@ -105,7 +100,6 @@ jobs:
           path: theos/sdks/
           key: iphoneos-${{ inputs.sdk_version }}-sdk
 
-      # 5) Fetch iOS SDK if cache missed
       - name: Fetch iOS SDK (if cache missed)
         if: steps.sdk_cache.outputs.cache-hit != 'true'
         run: |
@@ -117,7 +111,6 @@ jobs:
           mkdir -p "$THEOS/sdks"
           mv *.sdk "$THEOS/sdks"
 
-      # 6) Theos Jailed
       - name: Download Theos Jailed
         uses: actions/checkout@v4
         with:
@@ -131,16 +124,13 @@ jobs:
           set -euxo pipefail
           ./theos-jailed/install
 
-      # 7) Normalize decrypted IPA URL (Dropbox-safe; preserve rlkey; force dl=1)
       - name: Normalize decrypted IPA URL
         id: urlprep
         shell: bash
         run: |
           set -euo pipefail
           RAW="${{ inputs.decrypted_youtube_url }}"
-          # Unescape &amp; -> &
-          RAW="${RAW//&amp;/&}"
-          # Dropbox: keep all params and force dl=1
+          RAW="${RAW//&amp;amp;/&}"
           if [[ "$RAW" =~ ^https?://www\.dropbox\.com/ ]]; then
             if [[ "$RAW" == *\?* ]]; then
               if [[ "$RAW" =~ ([\?&])dl= ]]; then
@@ -155,7 +145,6 @@ jobs:
           echo "YOUTUBE_URL=$RAW" >> "$GITHUB_ENV"
           echo "::add-mask::$RAW"
 
-      # 8) Download + verify IPA (with Dropbox raw-host fallback)
       - name: Download and unpack YouTube IPA
         shell: bash
         run: |
@@ -214,24 +203,19 @@ jobs:
             fi
           fi
 
-          # Parse CFBundleVersion and export YT_VERSION
           YT_VERSION=$(python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; print(plistlib.load(open(p,"rb")).get("CFBundleVersion","0"))')
           echo "YT_VERSION=${YT_VERSION}" >> "$GITHUB_ENV"
 
-          # Strip signatures/plugins
           rm -rf tmp/Payload/YouTube.app/_CodeSignature || true
           rm -rf tmp/Payload/YouTube.app/PlugIns/* || true
 
-          # Remove UISupportedDevices
           python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; pl=plistlib.load(open(p,"rb")); pl.pop("UISupportedDevices",None); plistlib.dump(pl,open(p,"wb"))'
 
-          # Re-add any local Extensions
           if [ -d "Extensions" ] && compgen -G "Extensions/*.appex" > /dev/null; then
             mkdir -p tmp/Payload/YouTube.app/PlugIns
             cp -R Extensions/*.appex tmp/Payload/YouTube.app/PlugIns || true
           fi
 
-      # 9) Pre-download YTLite .deb (pinned or latest), verify it's a real Debian archive
       - name: Pre-download YTLite .deb (pinned or latest) and verify
         id: ytlitedeb
         env:
@@ -256,7 +240,6 @@ jobs:
           curl -L --fail --retry 5 --retry-delay 3 -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/octet-stream" "$api_url" -o Tweaks/YTLite/YTLite.deb
           file Tweaks/YTLite/YTLite.deb | grep -qi 'debian' || { echo "::error::Downloaded file is not a Debian archive"; exit 1; }
 
-      # 10) Decide disable regex
       - name: Decide disabled dylib regex from profile
         id: disable
         shell: bash
@@ -278,19 +261,16 @@ jobs:
             echo "::notice title=Disabled dylibs regex::$DISABLE"
           fi
 
-      # 11) Build using sidecar Makefile.ci (marker -> TAB conversion)
       - name: Build Package (sidecar Makefile.ci; tab-safe)
         shell: bash
         run: |
           set -euxo pipefail
 
-          # Guard: bundle id must not be a URL
           if echo "${{ inputs.bundle_id }}" | grep -qiE 'https?://'; then
             echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
             exit 1
           fi
 
-          # Write Makefile.ci with a __TAB__ marker, then convert markers to real TABs
           cat > Makefile.ci <<'MAKE'
           export TARGET ?= iphone:clang:18.6:14.0
           export SDK_PATH ?= $(THEOS)/sdks/iPhoneOS18.6.sdk/
@@ -379,7 +359,6 @@ jobs:
           __TAB__fi
           MAKE
 
-          # Convert markers to literal TABs so make sees valid recipes
           python3 - <<'PY'
 import io, sys
 p="Makefile.ci"
@@ -387,20 +366,16 @@ s=open(p,"r",encoding="utf-8").read().replace("__TAB__","\t")
 open(p,"w",encoding="utf-8").write(s)
 PY
 
-          # Optional peek to confirm tabs (recipe lines will start with a literal TAB)
           sed -n '1,90p' Makefile.ci | nl
 
-          # Core mode skip list
           if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
             SKIP_LIST="Source/Themes.xm Source/VersionSpooferLite.xm"
           else
             SKIP_LIST=""
           fi
 
-          # Choose make
           if command -v gmake >/dev/null 2>&1; then MAKE_BIN=gmake; else MAKE_BIN=make; fi
 
-          # Build
           "$MAKE_BIN" -f Makefile.ci package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
             BUNDLE_ID="${{ inputs.bundle_id }}" \
             DISPLAY_NAME="${{ inputs.app_name }}" \
@@ -410,7 +385,6 @@ PY
             SKIP_CORE_FILES="${SKIP_LIST}" \
             DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
 
-          # Verify & rename artifact; emit hash
           OUT="$(ls -t packages | head -n1 || true)"
           mv "packages/${OUT}" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
           echo "==> Listing packages/"
@@ -426,7 +400,6 @@ PY
           echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
           echo "==> Bundle ID: ${{ inputs.bundle_id }}"
 
-      # 12) Always upload artifact
       - name: Upload build artifacts (packages - always)
         uses: actions/upload-artifact@v4
         with:
@@ -434,7 +407,6 @@ PY
           path: packages/
           if-no-files-found: error
 
-      # 13) Optional: Draft GitHub Release
       - name: Create Draft GitHub Release
         if: ${{ inputs.create_release }}
         uses: softprops/action-gh-release@v2
@@ -451,7 +423,6 @@ PY
             Core Mode: ${{ inputs.core_mode }}
             Disable Profile: ${{ inputs.disable_profile }}
 
-      # 14) Summary
       - name: Job Summary
         shell: bash
         run: |
