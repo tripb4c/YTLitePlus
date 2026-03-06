@@ -57,11 +57,6 @@ on:
         default: true
         required: false
         type: boolean
-      catbox_upload:
-        description: "Upload IPA to Catbox (optional)"
-        default: false
-        required: false
-        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -78,18 +73,22 @@ jobs:
       THEOS: ${{ github.workspace }}/theos
 
     steps:
+      # 1) Your repo
       - name: Checkout repo
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
+      # 2) Tooling
       - name: Install build dependencies
         run: |
           set -euxo pipefail
           brew update
           brew install jq curl unzip ldid dpkg gnu-sed make
+          # Put GNU make 'gnubin' first so 'make' is GNU make
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
+      # 3) Theos (pinned SHA)
       - name: Download Theos
         uses: actions/checkout@v4
         with:
@@ -98,6 +97,7 @@ jobs:
           path: theos
           submodules: recursive
 
+      # 4) Cache SDK
       - name: Cache iOS SDK
         id: sdk_cache
         uses: actions/cache@v4
@@ -105,6 +105,7 @@ jobs:
           path: theos/sdks/
           key: iphoneos-${{ inputs.sdk_version }}-sdk
 
+      # 5) Fetch SDK if needed
       - name: Fetch iOS SDK (if cache missed)
         if: steps.sdk_cache.outputs.cache-hit != 'true'
         run: |
@@ -116,6 +117,7 @@ jobs:
           mkdir -p "$THEOS/sdks"
           mv *.sdk "$THEOS/sdks"
 
+      # 6) Theos-jailed
       - name: Download Theos Jailed
         uses: actions/checkout@v4
         with:
@@ -129,6 +131,7 @@ jobs:
           set -euxo pipefail
           ./theos-jailed/install
 
+      # 7) Normalize decrypted IPA URL (Dropbox-safe; preserves rlkey; forces dl=1)
       - name: Normalize decrypted IPA URL
         id: urlprep
         shell: bash
@@ -150,6 +153,7 @@ jobs:
           echo "YOUTUBE_URL=$RAW" >> "$GITHUB_ENV"
           echo "::add-mask::$RAW"
 
+      # 8) Download, verify, and unpack IPA (with Dropbox raw-host fallback)
       - name: Download and unpack YouTube IPA
         shell: bash
         run: |
@@ -199,7 +203,7 @@ jobs:
                 echo "Tips:"
                 echo "  - Ensure the link is a FILE share (not a folder)."
                 echo "  - Keep the rlkey=... parameter."
-                echo "  - Or upload to Catbox and paste that direct URL."
+                echo "  - Or upload to Catbox and use that direct URL."
                 exit 1
               fi
             else
@@ -208,19 +212,24 @@ jobs:
             fi
           fi
 
+          # Parse CFBundleVersion
           YT_VERSION=$(python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; print(plistlib.load(open(p,"rb")).get("CFBundleVersion","0"))')
           echo "YT_VERSION=${YT_VERSION}" >> "$GITHUB_ENV"
 
+          # Strip signatures/plugins
           rm -rf tmp/Payload/YouTube.app/_CodeSignature || true
           rm -rf tmp/Payload/YouTube.app/PlugIns/* || true
 
+          # Remove UISupportedDevices
           python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; pl=plistlib.load(open(p,"rb")); pl.pop("UISupportedDevices",None); plistlib.dump(pl,open(p,"wb"))'
 
+          # Re-add any local Extensions
           if [ -d "Extensions" ] && compgen -G "Extensions/*.appex" > /dev/null; then
             mkdir -p tmp/Payload/YouTube.app/PlugIns
             cp -R Extensions/*.appex tmp/Payload/YouTube.app/PlugIns || true
           fi
 
+      # 9) Pre-download YTLite .deb (pinned or latest), verify it's a real Debian archive
       - name: Pre-download YTLite .deb (pinned or latest) and verify
         id: ytlitedeb
         env:
@@ -246,6 +255,7 @@ jobs:
           curl -L --fail --retry 5 --retry-delay 3 -H "Authorization: Bearer ${GITHUB_TOKEN}" -H "Accept: application/octet-stream" "$api_url" -o Tweaks/YTLite/YTLite.deb
           file Tweaks/YTLite/YTLite.deb | grep -qi 'debian' || { echo "::error::Downloaded file is not a Debian archive"; exit 1; }
 
+      # 10) Decide disable regex
       - name: Decide disabled dylib regex from profile
         id: disable
         shell: bash
@@ -267,16 +277,20 @@ jobs:
             echo "::notice title=Disabled dylibs regex::$DISABLE"
           fi
 
+      # 11) Build using sidecar Makefile.ci with recipe-prefix (no TAB issues)
       - name: Build Package (sidecar Makefile.ci; no repo Makefile)
         shell: bash
         run: |
           set -euxo pipefail
+
+          # Guard: bundle id must not be a URL
           if echo "${{ inputs.bundle_id }}" | grep -qiE 'https?://'; then
             echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
             exit 1
           fi
 
           cat > Makefile.ci <<'MAKE'
+          .RECIPEPREFIX := >
           export TARGET ?= iphone:clang:18.6:14.0
           export SDK_PATH ?= $(THEOS)/sdks/iPhoneOS18.6.sdk/
           export SYSROOT ?= $(SDK_PATH)
@@ -313,9 +327,9 @@ jobs:
             .theos/obj/YouTimeStamp.dylib \
             .theos/obj/YouGroupSettings.dylib
 
-          YTLitePlus_EMBED_LIBRARIES = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
+          YTLitePlus_EMBED_LIBRARIES  = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
           YTLitePlus_EMBED_FRAMEWORKS = $(_THEOS_LOCAL_DATA_DIR)/$(_THEOS_OBJ_DIR_NAME)/install_Alderis.xcarchive/Products/var/jb/Library/Frameworks/Alderis.framework
-          YTLitePlus_EMBED_BUNDLES = $(wildcard Bundles/*.bundle)
+          YTLitePlus_EMBED_BUNDLES    = $(wildcard Bundles/*.bundle)
           YTLitePlus_EMBED_EXTENSIONS = $(wildcard Extensions/*.appex)
 
           YTLitePlus_IPA = ./tmp/Payload/YouTube.app
@@ -330,55 +344,60 @@ jobs:
           REMOVE_EXTENSIONS = 1
           CODESIGN_IPA = 0
 
-          YTLITE_PATH := Tweaks/YTLite
-          YTLITE_DEB := $(firstword $(wildcard $(YTLITE_PATH)/*.deb))
-          YTLITE_DYLIB := $(YTLITE_PATH)/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
-          YTLITE_BUNDLE := $(YTLITE_PATH)/var/jb/Library/Application Support/YTLite.bundle
+          YTLITE_PATH   := Tweaks/YTLite
+          YTLITE_DEB    := $(firstword $(wildcard $(YTLITE_PATH)/*.deb))
+          YTLITE_DYLIB  := $(YTLITE_PATH)/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
+          YTLITE_BUNDLE := $(YTLITE_PATH)/var/jb/Library/Application\ Support/YTLite.bundle
 
           internal-clean::
-              @rm -rf "$(YTLITE_PATH)"/*
+          > @rm -rf "$(YTLITE_PATH)"/*
 
           before-all::
-              @mkdir -p "$(YTLITE_PATH)"; \
-              if [ ! -f "$(YTLITE_DEB)" ]; then \
-                  echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
-              fi; \
-              if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-                  tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
-                  tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
-                  if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-                      echo "==> Failed to extract YTLite"; exit 1; \
-                  fi; \
-              fi
+          > @mkdir -p "$(YTLITE_PATH)"; \
+          > if [ ! -f "$(YTLITE_DEB)" ]; then \
+          >   echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
+          > fi; \
+          > if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
+          >   tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
+          >   tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
+          >   if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
+          >     echo "==> Failed to extract YTLite"; exit 1; \
+          >   fi; \
+          > fi
 
           before-package::
-              @if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
-                  echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
-                  find .theos -type f -name "*.dylib" | while read f; do \
-                      echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
-                  done; \
-              fi
+          > @if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
+          >   echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
+          >   find .theos -type f -name "*.dylib" | while read f; do \
+          >     echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
+          >   done; \
+          > fi
           MAKE
 
-          sed -n '1,40p' Makefile.ci | sed -e $'s/\t/[TAB]\t/g' | nl
+          # Quick peek (optional)
+          sed -n '1,60p' Makefile.ci | nl
 
+          # Core mode skip list
           if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
             SKIP_LIST="Source/Themes.xm Source/VersionSpooferLite.xm"
           else
             SKIP_LIST=""
           fi
 
+          # Choose make
           if command -v gmake >/dev/null 2>&1; then MAKE_BIN=gmake; else MAKE_BIN=make; fi
 
+          # Build
           "$MAKE_BIN" -f Makefile.ci package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
             BUNDLE_ID="${{ inputs.bundle_id }}" \
             DISPLAY_NAME="${{ inputs.app_name }}" \
             PACKAGE_VERSION="${YT_VERSION}-${YTLITE_VERSION}" \
             TARGET="iphone:clang:${{ inputs.sdk_version }}:14.0" \
             SDK_PATH="${THEOS}/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/" \
-            SKIP_CORE_FILES="$SKIP_LIST" \
+            SKIP_CORE_FILES="${SKIP_LIST}" \
             DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
 
+          # Verify & rename artifact; emit hash
           OUT="$(ls -t packages | head -n1)"
           mv "packages/${OUT}" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
           echo "==> Listing packages/"
@@ -394,6 +413,7 @@ jobs:
           echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
           echo "==> Bundle ID: ${{ inputs.bundle_id }}"
 
+      # 12) Always upload artifact
       - name: Upload build artifacts (packages - always)
         uses: actions/upload-artifact@v4
         with:
@@ -401,9 +421,24 @@ jobs:
           path: packages/
           if-no-files-found: error
 
-      
+      # 13) Optional: Draft GitHub Release
+      - name: Create Draft GitHub Release
+        if: ${{ inputs.create_release }}
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }}
+          name: v${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }} - YTLitePlus
+          draft: true
+          files: packages/*.ipa
+          body: |
+            YouTube (CFBundleVersion): ${{ env.YT_VERSION }}
+            YTLite tag: ${{ env.YTLITE_VERSION }}
+            Core Mode: ${{ inputs.core_mode }}
+            Disable Profile: ${{ inputs.disable_profile }}
 
-
+      # 14) Summary
       - name: Job Summary
         shell: bash
         run: |
