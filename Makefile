@@ -3,7 +3,13 @@
   run: |
     set -euxo pipefail
 
-    # ── Overwrite Makefile on the runner (preserves TABs; fixes "missing separator") ──
+    echo "==> CWD: $(pwd)"
+    ls -la
+
+    # 0) Nuke any existing Makefile (it may be corrupted or have CRLF/BOM)
+    rm -f Makefile
+
+    # 1) Overwrite Makefile on the runner (heredoc preserves TABs)
     cat > Makefile <<'MAKE'
     # ===== Theos / Target toolchain =====
     export TARGET      = iphone:clang:18.6:14.0
@@ -137,38 +143,36 @@
         fi
     MAKE
 
-    # (Optional) show the first 20 lines with TAB markers once for sanity
-    # sed -n '1,20p' Makefile | sed -e $'s/\t/[TAB]\t/g' | nl
+    # 2) Show the first 30 lines with TAB markers so we can confirm formatting
+    sed -n '1,30p' Makefile | sed -e $'s/\t/[TAB]\t/g' | nl
 
-    # ── Safety: validate inputs ──
+    # 3) Safety: validate BUNDLE_ID is not a URL
     if echo "${BUNDLE_ID}" | grep -qiE 'https?://'; then
       echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
       exit 1
     fi
 
-    # Apply chosen disable set to env
+    # 4) Apply chosen disable set to env (from your inputs)
     if [ -n "${DISABLE_REGEX:-}" ]; then
       export DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
     fi
 
-    # Patch Makefile from inputs (ok to run after overwrite)
+    # 5) Patch Makefile from inputs (same as you already do)
     sed -i '' "s/^BUNDLE_ID.*$/BUNDLE_ID = ${BUNDLE_ID}/" Makefile
     sed -i '' "s/^DISPLAY_NAME.*$/DISPLAY_NAME = ${APP_NAME}/" Makefile
     sed -i '' "s/^PACKAGE_VERSION.*$/PACKAGE_VERSION = ${YT_VERSION}-${YTLITE_VERSION}/" Makefile
     sed -i '' "s/^export TARGET.*$/export TARGET = iphone:clang:${SDK_VER}:14.0/" Makefile
     sed -i '' "s|^export SDK_PATH.*$|export SDK_PATH = \$(THEOS)/sdks/iPhoneOS${SDK_VER}.sdk/|" Makefile
 
-    # ── Build with Core‑Lite ON for the first pass (skip early/fragile hooks) ──
+    # 6) Build with Core‑Lite ON (skip early/fragile hooks)
     make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
       YTLITE_VERSION="${YTLITE_VERSION}" \
       SKIP_CORE_FILES="Source/Themes.xm Source/VersionSpooferLite.xm"
 
-    # Rename to friendly name (ignore if already matched)
+    # 7) Rename to friendly name
     mv "packages/$(ls -t packages | head -n1)" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
 
-    # Expose final name to later steps
+    # 8) Expose final name and print hash
     echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
-
-    # Show hash & bundle id
     echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
     echo "==> Bundle ID: ${BUNDLE_ID}"
