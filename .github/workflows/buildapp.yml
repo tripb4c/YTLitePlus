@@ -6,26 +6,18 @@ name: Build and Release YTLitePlus
 on:
   workflow_dispatch:
     inputs:
-      # Pin a YTLite tag (e.g., 5.1.3). Leave blank for latest.
-      ytlite_version:
-        description: "(Optional) YTLite tag to build (e.g. 5.1.3). Leave blank for latest."
-        default: ""
-        required: false
-        type: string
-
-      # Profiles to quickly toggle which tweaks are disabled this run
       disable_profile:
         description: "Which tweaks to disable for this build?"
         required: true
         type: choice
         options:
-          - Login-friendly (disable Group B: Playback/PiP/RYD/FLEX)
-          - Minimal (stable baseline)
-          - Disable Group A (UI/Settings)
-          - Disable Group B (Playback/PiP/RYD/FLEX)
-          - None (enable everything)
-          - Custom (use custom_disable_regex)
-        default: Login-friendly (disable Group B: Playback/PiP/RYD/FLEX)
+          - "Login-friendly (disable Group B: Playback/PiP/RYD/FLEX)"
+          - "Minimal (stable baseline)"
+          - "Disable Group A (UI/Settings)"
+          - "Disable Group B (Playback/PiP/RYD/FLEX)"
+          - "None (enable everything)"
+          - "Custom (use custom_disable_regex)"
+        default: "Login-friendly (disable Group B: Playback/PiP/RYD/FLEX)"
 
       custom_disable_regex:
         description: "If 'Custom', paste a regex of dylib names to disable (e.g. YTUHD|YouPiP)"
