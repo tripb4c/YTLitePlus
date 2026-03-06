@@ -1,13 +1,43 @@
-# Original idea by @ISnackable. Many thanks to him for handling the most hardest parts!
-# https://github.com/ISnackable/CercubePlus/blob/main/.github/workflows/Build.yml
-
 name: Build and Release YTLitePlus
 
 on:
   workflow_dispatch:
     inputs:
+      decrypted_youtube_url:
+        description: "Direct URL of the decrypted YouTube IPA (Catbox/Dropbox/etc.)"
+        default: "https://files.catbox.moe/5a8qlt.ipa"
+        required: true
+        type: string
+      bundle_id:
+        description: "Bundle identifier to use"
+        default: "com.google.ios.youtube"
+        required: true
+        type: string
+      app_name:
+        description: "App display name"
+        default: "YouTube"
+        required: true
+        type: string
+      sdk_version:
+        description: "iOS SDK version to build against"
+        default: "18.6"
+        required: true
+        type: string
+      ytlite_version:
+        description: "(Optional) Pin a YTLite tag (e.g., 5.1.3). Leave blank for latest."
+        default: ""
+        required: false
+        type: string
+      core_mode:
+        description: "Core mode"
+        required: true
+        type: choice
+        options:
+          - "Full"
+          - "Core-Lite (safer)"
+        default: "Core-Lite (safer)"
       disable_profile:
-        description: "Which tweaks to disable for this build?"
+        description: "Disable a set of tweaks (regex applied to built dylibs)"
         required: true
         type: choice
         options:
@@ -18,57 +48,22 @@ on:
           - "None (enable everything)"
           - "Custom (use custom_disable_regex)"
         default: "Login-friendly (disable Group B: Playback/PiP/RYD/FLEX)"
-
       custom_disable_regex:
-        description: "If 'Custom', paste a regex of dylib names to disable (e.g. YTUHD|YouPiP)"
+        description: "If Custom, regex of dylib names to disable (e.g. YTUHD|YouPiP)"
         required: false
         type: string
-
-      # Original inputs
-      sdk_version:
-        description: "iOS SDK Version"
-        default: "18.6"
-        required: true
-        type: string
-
-      decrypted_youtube_url:
-        description: "Direct URL of the decrypted YouTube IPA (Dropbox/Catbox etc.)"
-        default: "https://files.catbox.moe/5a8qlt.ipa"
-        required: true
-        type: string
-
-      bundle_id:
-        description: "Modify the bundle ID"
-        default: "com.google.ios.youtube"
-        required: true
-        type: string
-
-      app_name:
-        description: "Modify the app name"
-        default: "YouTube"
-        required: true
-        type: string
-
-      commit_id:
-        description: "(Optional) Commit ID to build at"
-        default: ""
-        required: false
-        type: string
-
       upload_artifact:
-        description: "Upload IPA as artifact (Public)"
-        default: false
+        description: "Upload IPA as Artifact"
+        default: true
         required: false
         type: boolean
-
       catbox_upload:
-        description: "Upload IPA to Catbox.moe (URL)"
+        description: "Upload IPA to Catbox (requires PERSONAL_ACCESS_TOKEN if you also dispatch another workflow)"
         default: false
         required: false
         type: boolean
-
       create_release:
-        description: "Create a draft release (Private)"
+        description: "Create a draft GitHub Release (private)"
         default: true
         required: false
         type: boolean
@@ -80,53 +75,54 @@ concurrency:
 jobs:
   build:
     name: Build YTLitePlus
-    runs-on: macos-15-intel
+    runs-on: macos-15
     permissions:
       contents: write
 
+    env:
+      THEOS: ${{ github.workspace }}/theos
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6.0.1
+      - name: Checkout repo
+        uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.commit_id || github.ref }}
           submodules: recursive
 
-      - name: Install Dependencies
+      - name: Install build dependencies
         run: |
-          brew install ldid dpkg make jq curl unzip
+          brew update
+          brew install jq curl unzip ldid dpkg gnu-sed make
+          # Provide GNU make explicitly as gmake (still export to PATH for 'make' too)
+          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Download Theos
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v4
         with:
           repository: theos/theos
           ref: 13c22376b5d83ff759c1993de0a861e673aa522b
           path: theos
           submodules: recursive
 
-      - name: iOS SDK Caching
-        id: SDK
-        uses: actions/cache@v5.0.2
+      - name: Cache iOS SDK
+        id: sdk_cache
+        uses: actions/cache@v4
         with:
           path: theos/sdks/
-          key: iOS-${{ inputs.sdk_version }}-SDK
-          restore-keys: iOS-${{ inputs.sdk_version }}-SDK
+          key: iphoneos-${{ inputs.sdk_version }}-sdk
 
-      - name: Download iOS SDK
-        if: steps.SDK.outputs.cache-hit != 'true'
-        env:
-          THEOS: ${{ github.workspace }}/theos
-          SDK_VER: ${{ inputs.sdk_version }}
+      - name: Fetch iOS SDK (if cache missed)
+        if: steps.sdk_cache.outputs.cache-hit != 'true'
         run: |
           set -euxo pipefail
-          git clone -n --depth=1 --filter=tree:0 https://github.com/aricloverEXTRA/sdks/
-          cd sdks
-          git sparse-checkout set --no-cone "iPhoneOS${SDK_VER}.sdk"
+          git clone -n --depth=1 --filter=tree:0 https://github.com/aricloverEXTRA/sdks/ sdks-src
+          cd sdks-src
+          git sparse-checkout set --no-cone "iPhoneOS${{ inputs.sdk_version }}.sdk"
           git checkout
           mkdir -p "$THEOS/sdks"
           mv *.sdk "$THEOS/sdks"
 
       - name: Download Theos Jailed
-        uses: actions/checkout@v6.0.1
+        uses: actions/checkout@v4
         with:
           repository: qnblackcat/theos-jailed
           ref: master
@@ -134,301 +130,27 @@ jobs:
           submodules: recursive
 
       - name: Install Theos Jailed
-        env:
-          THEOS: ${{ github.workspace }}/theos
         run: |
           set -euxo pipefail
           ./theos-jailed/install
-        
-      - name: Fix Compiling
-        env:
-          THEOS: ${{ github.workspace }}/theos
-        run: |
-          set -euxo pipefail
-          # Update GNU Make to allow for faster building
-          echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
-          (echo export PATH="/usr/local/opt/make/libexec/gnubin:$PATH" >> ~/.bash_profile)
-          source ~/.bash_profile
 
-      # Use original input URL, but make it safe: unescape &amp; and force Dropbox dl=1
-      - name: Hash YT IPA URL (normalize & and Dropbox dl=1)
+      - name: Normalize decrypted IPA URL
+        id: urlprep
         run: |
           set -euo pipefail
-          URL_YT="$(jq -r '.inputs.decrypted_youtube_url' "$GITHUB_EVENT_PATH")"
-          echo "::add-mask::$URL_YT"
-          # Unescape '&amp;' -> '&'
-          URL_YT="${URL_YT//&amp;/&}"
-          # Force Dropbox to direct download (?dl=1)
-          if [[ "$URL_YT" =~ ^https?://www\.dropbox\.com/ ]]; then
-            base="${URL_YT%%\?*}"
-            if [[ "$base" == "$URL_YT" ]]; then
-              URL_YT="${base}?dl=1"
-            else
-              query="${URL_YT#*\?}"
-              query="&${query}&"
-              query="${query//&dl=[^&]*/&}"
-              query="${query//&&/&}"
-              query="${query#&}"; query="${query%&}"
-              if [[ -n "$query" ]]; then
-                URL_YT="${base}?${query}&dl=1"
-              else
-                URL_YT="${base}?dl=1"
-              fi
-            fi
+          RAW="${{ inputs.decrypted_youtube_url }}"
+          # Unescape HTML &amp; → &
+          RAW="${RAW//&amp;/&}"
+          # Force Dropbox direct download
+          if [[ "$RAW" =~ ^https?://www\.dropbox\.com/ ]]; then
+            base="${RAW%%\?*}"
+            RAW="${base}?dl=1"
           fi
-          echo "YOUTUBE_URL=$URL_YT" >> "$GITHUB_ENV"
-          echo "::add-mask::$URL_YT"
+          echo "YOUTUBE_URL=$RAW" >> "$GITHUB_ENV"
+          echo "::add-mask::$RAW"
 
-      - name: Prepare YouTube IPA
-        env:
-          THEOS: ${{ github.workspace }}/theos
-          YOUTUBE_URL: ${{ env.YOUTUBE_URL }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Download and unpack YouTube IPA
         run: |
           set -euxo pipefail
-          curl -L --fail --retry 5 --retry-delay 3 -H "User-Agent: YTLitePlus-CI" "$YOUTUBE_URL" -o YouTube.ipa
-          MIN_SIZE=$((10 * 1024 * 1024))
-          ACT_SIZE=$(stat -f%z YouTube.ipa)
-          if [ "$ACT_SIZE" -lt "$MIN_SIZE" ]; then
-            echo "Downloaded file looks too small ($ACT_SIZE bytes)."
-            exit 1
-          fi
-          unzip -q YouTube.ipa -d tmp
-          test -d tmp/Payload/YouTube.app || { echo "YouTube.app not found in IPA"; ls -lah tmp; exit 1; }
-
-          echo "YT_VERSION=$(grep -A 1 '<key>CFBundleVersion</key>' tmp/Payload/YouTube.app/Info.plist | grep '<string>' | awk -F'[><]' '{print $3}')" >> "$GITHUB_ENV"
-
-          # If user pinned a tag, record it now; else we’ll fetch latest in the next step
-          if [ -n "${{ github.event.inputs.ytlite_version }}" ]; then
-            echo "YTLITE_VERSION=${{ github.event.inputs.ytlite_version }}" >> "$GITHUB_ENV"
-            echo "Using pinned YTLite tag: ${{ github.event.inputs.ytlite_version }}"
-          fi
-
-          rm -rf tmp/Payload/YouTube.app/_CodeSignature/CodeResources
-          rm -rf tmp/Payload/YouTube.app/PlugIns/*
-
-          python - <<'EOF'
-          import plistlib
-          filepath = 'tmp/Payload/YouTube.app/Info.plist'
-          with open(filepath, 'rb') as f:
-              plist = plistlib.load(f)
-          plist.pop('UISupportedDevices', None)
-          with open(filepath, 'wb') as f:
-              plistlib.dump(plist, f)
-          EOF
-
-          cp -R Extensions/*.appex tmp/Payload/YouTube.app/PlugIns
-
-      # Pre-download YTLite .deb robustly so Makefile doesn't fetch an HTML page
-      - name: Pre-download YTLite .deb (robust fetch)
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PIN_TAG: ${{ github.event.inputs.ytlite_version }}
-        run: |
-          set -euxo pipefail
-
-          owner="dayanch96"
-          repo="YTLite"
-
-          # Decide tag to use
-          if [ -n "${PIN_TAG}" ]; then
-            tag="v${PIN_TAG}"
-            echo "YTLITE_VERSION=${PIN_TAG}" >> "$GITHUB_ENV"
-          else
-            tag="$(curl -sS --fail \
-              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-              -H "User-Agent: YTLitePlus-CI" \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/${owner}/${repo}/releases/latest" \
-              | jq -r '.tag_name')"
-            [ -n "${tag}" ] && [ "${tag}" != "null" ]
-            echo "YTLITE_VERSION=${tag#v}" >> "$GITHUB_ENV"
-          fi
-          echo "Using YTLite tag: ${tag}"
-
-          # Get release JSON and locate a .deb asset
-          rel_json="$(curl -sS --fail \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "User-Agent: YTLitePlus-CI" \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/${owner}/${repo}/releases/tags/${tag}")"
-
-          asset_api_url="$(echo "${rel_json}" \
-            | jq -r '.assets[] | select(.name|endswith(".deb")) | .url' | head -n1)"
-
-          if [ -z "${asset_api_url}" ] || [ "${asset_api_url}" = "null" ]; then
-            echo "No .deb asset found on tag ${tag}. Available assets:"
-            echo "${rel_json}" | jq -r '.assets[].name'
-            exit 1
-          fi
-
-          mkdir -p Tweaks Tweaks/YTLite
-          # Download as binary using correct Accept header
           curl -L --fail --retry 5 --retry-delay 3 \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            -H "Accept: application/octet-stream" \
             -H "User-Agent: YTLitePlus-CI" \
-            "${asset_api_url}" -o Tweaks/YTLite/YTLite.deb
-
-          # Sanity check: confirm it's a Debian archive
-          file Tweaks/YTLite/YTLite.deb
-          if ! file Tweaks/YTLite/YTLite.deb | grep -qi 'Debian binary'; then
-            echo "Downloaded file is not a Debian archive. Aborting."
-            exit 1
-          fi
-
-          # Also provide a top-level convenience copy (in case Makefile looks here)
-          cp Tweaks/YTLite/YTLite.deb Tweaks/YTLite.deb || true
-
-      # Decide which tweaks to disable this run
-      - name: Decide disabled tweaks
-        id: disable_set
-        env:
-          CHOICE: ${{ github.event.inputs.disable_profile }}
-          CUSTOM: ${{ github.event.inputs.custom_disable_regex }}
-        run: |
-          set -euo pipefail
-          case "${CHOICE}" in
-            "Login-friendly (disable Group B: Playback/PiP/RYD/FLEX)")
-              # Keep settings/AB on for Google login; disable common crashers
-              DISABLE="YTUHD|YouPiP|YouTubeDislikesReturn|libFLEX"
-              ;;
-            "Minimal (stable baseline)")
-              DISABLE="libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay|YouTimeStamp|DontEatMyContent|YTABConfig|YouTubeDislikesReturn"
-              ;;
-            "Disable Group A (UI/Settings)")
-              DISABLE="YTVideoOverlay|YouGroupSettings|YTABConfig|YouTimeStamp|DontEatMyContent"
-              ;;
-            "Disable Group B (Playback/PiP/RYD/FLEX)")
-              DISABLE="YTUHD|YouPiP|YouTubeDislikesReturn|libFLEX"
-              ;;
-            "None (enable everything)")
-              DISABLE=""
-              ;;
-            "Custom (use custom_disable_regex)")
-              DISABLE="${CUSTOM}"
-              ;;
-            *)
-              DISABLE=""
-              ;;
-          esac
-          echo "regex=${DISABLE}" >> "$GITHUB_OUTPUT"
-          if [ -n "${DISABLE}" ]; then
-            echo "::add-mask::${DISABLE}"
-          fi
-          echo "Using DISABLE_DYLIBS_REGEX='${DISABLE:-<none>}'"
-
-      - name: Build Package
-        id: build_package
-        env:
-          THEOS: ${{ github.workspace }}/theos
-          BUNDLE_ID: ${{ inputs.bundle_id }}
-          APP_NAME: ${{ inputs.app_name }}
-          SDK_VER: ${{ inputs.sdk_version }}
-          DISABLE_REGEX: ${{ steps.disable_set.outputs.regex }}
-        run: |
-          set -euxo pipefail
-
-          # Safety: validate BUNDLE_ID looks like a bundle id, not a URL
-          if echo "${BUNDLE_ID}" | grep -qiE 'https?://'; then
-            echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
-            exit 1
-          fi
-
-          # Apply chosen disable set
-          if [ -n "${DISABLE_REGEX:-}" ]; then
-            export DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
-          fi
-
-          # Patch Makefile from inputs
-          sed -i '' "s/^BUNDLE_ID.*$/BUNDLE_ID = ${BUNDLE_ID}/" Makefile
-          sed -i '' "s/^DISPLAY_NAME.*$/DISPLAY_NAME = ${APP_NAME}/" Makefile
-          sed -i '' "s/^PACKAGE_VERSION.*$/PACKAGE_VERSION = ${YT_VERSION}-${YTLITE_VERSION}/" Makefile
-          sed -i '' "s/^export TARGET.*$/export TARGET = iphone:clang:${SDK_VER}:14.0/" Makefile
-          sed -i '' "s|^export SDK_PATH.*$|export SDK_PATH = \$(THEOS)/sdks/iPhoneOS${SDK_VER}.sdk/|" Makefile
-
-          # Build (Makefile will now find a valid .deb locally)
-          make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 YTLITE_VERSION="${YTLITE_VERSION}"
-
-          # Rename to friendly name (ignore error if already matched)
-          mv "packages/$(ls -t packages | head -n1)" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
-
-          # Expose final name to later steps
-          echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
-
-          # Show hash & bundle id
-          echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
-          echo "==> Bundle ID: ${BUNDLE_ID}"
-
-      - name: Upload Artifact (optional flag)
-        if: ${{ inputs.upload_artifact }}
-        uses: actions/upload-artifact@v4.5.0
-        with:
-          name: YTLitePlus_${{ env.YT_VERSION }}_${{ env.YTLITE_VERSION }}
-          path: packages/${{ steps.build_package.outputs.package }}
-          if-no-files-found: error
-          
-      - name: Upload Artifact to Catbox and update AltStore repo (optional flag)
-        if: ${{ inputs.catbox_upload }}
-        env:
-          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
-        run: |
-          set -euxo pipefail
-          RESPONSE=$(curl -F "reqtype=fileupload" -F "fileToUpload=@packages/${{ steps.build_package.outputs.package }}" https://catbox.moe/user/api.php)
-          CATBOX_URL=$(echo "$RESPONSE" | grep -o -E 'https://files.catbox.moe/[^"]*' || true)
-          if [ -z "$CATBOX_URL" ]; then
-            echo "Catbox upload did not return a URL. Response: $RESPONSE"
-            exit 1
-          fi
-          echo "Uploaded artifact to $CATBOX_URL"
-          CATBOX_FILE=$(echo "$CATBOX_URL" | sed 's|https://files.catbox.moe/||')
-          echo "CATBOX_FILE=$CATBOX_FILE" >> "$GITHUB_ENV"
-          echo "CATBOX_URL=$CATBOX_URL" >> "$GITHUB_ENV"
-      
-          jq -n \
-            --arg ref "main" \
-            --arg url "$CATBOX_URL" \
-            --arg ylp "${YTLITE_VERSION}" \
-            --arg yv "${YT_VERSION}" \
-            '{ref:$ref, inputs:{yt_lite_plus_url:$url, yt_lite_plus_version:$ylp, yt_version:$yv}}' \
-          | curl -sS -X POST \
-              -H "Authorization: token ${PERSONAL_ACCESS_TOKEN}" \
-              -H "Content-Type: application/json" \
-              --data-binary @- \
-              "https://api.github.com/repos/Balackburn/YTLitePlusAltstore/actions/workflows/update_source.yml/dispatches"
-
-      - name: Prepare Release Notes (optional flag)
-        if: ${{ inputs.create_release }}
-        run: |
-          TODAY=$(date '+%Y-%m-%d')
-          sed "s/%ytliteplus_version%/${YTLITE_VERSION}/g; s/%youtube_version%/${YT_VERSION}/g; s/%catbox_url%/${CATBOX_FILE}/g; s/%date%/$TODAY/g" \
-            .github/RELEASE_TEMPLATE/Release.md > release_notes.md
-
-      - name: Create Draft Release (optional flag)
-        if: ${{ inputs.create_release }}
-        id: create_release
-        uses: softprops/action-gh-release@v2.5.0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }}
-          name: v${{ env.YT_VERSION }}-${{ env.YTLITE_VERSION }} - YTLitePlus
-          files: packages/*.ipa
-          draft: true
-          body_path: release_notes.md
-
-      - name: Job Summary
-        run: |
-          {
-            echo '### Build Complete'
-            echo
-            echo "Disable profile: ${{ inputs.disable_profile }}"
-            if [ "${{ inputs.disable_profile }}" = "Custom (use custom_disable_regex)" ]; then
-              echo "Custom regex: ${{ inputs.custom_disable_regex }}"
-            fi
-            echo
-            echo "YouTube: ${YT_VERSION}"
-            echo "YTLite:  ${YTLITE_VERSION}"
-          } >> "$GITHUB_STEP_SUMMARY"
