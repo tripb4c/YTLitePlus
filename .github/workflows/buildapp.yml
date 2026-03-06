@@ -88,7 +88,7 @@ jobs:
           # Put GNU make 'gnubin' first so 'make' is GNU make
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
-      # 3) Theos (pinned SHA)
+      # 3) Theos (pinned revision)
       - name: Download Theos
         uses: actions/checkout@v4
         with:
@@ -105,7 +105,7 @@ jobs:
           path: theos/sdks/
           key: iphoneos-${{ inputs.sdk_version }}-sdk
 
-      # 5) Fetch SDK if needed
+      # 5) Fetch SDK if cache missed
       - name: Fetch iOS SDK (if cache missed)
         if: steps.sdk_cache.outputs.cache-hit != 'true'
         run: |
@@ -117,7 +117,7 @@ jobs:
           mkdir -p "$THEOS/sdks"
           mv *.sdk "$THEOS/sdks"
 
-      # 6) Theos-jailed
+      # 6) Theos Jailed
       - name: Download Theos Jailed
         uses: actions/checkout@v4
         with:
@@ -131,7 +131,7 @@ jobs:
           set -euxo pipefail
           ./theos-jailed/install
 
-      # 7) Normalize decrypted IPA URL (Dropbox-safe; preserves rlkey; forces dl=1)
+      # 7) Normalize decrypted IPA URL (Dropbox-safe; preserve rlkey; force dl=1)
       - name: Normalize decrypted IPA URL
         id: urlprep
         shell: bash
@@ -153,7 +153,7 @@ jobs:
           echo "YOUTUBE_URL=$RAW" >> "$GITHUB_ENV"
           echo "::add-mask::$RAW"
 
-      # 8) Download, verify, and unpack IPA (with Dropbox raw-host fallback)
+      # 8) Download + verify IPA (with Dropbox raw-host fallback)
       - name: Download and unpack YouTube IPA
         shell: bash
         run: |
@@ -212,7 +212,7 @@ jobs:
             fi
           fi
 
-          # Parse CFBundleVersion
+          # Parse CFBundleVersion and export YT_VERSION
           YT_VERSION=$(python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; print(plistlib.load(open(p,"rb")).get("CFBundleVersion","0"))')
           echo "YT_VERSION=${YT_VERSION}" >> "$GITHUB_ENV"
 
@@ -237,8 +237,7 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-          owner="dayanch96"
-          repo="YTLite"
+          owner="dayanch96"; repo="YTLite"
           if [ -n "${{ inputs.ytlite_version }}" ]; then
             tag="v${{ inputs.ytlite_version }}"
           else
@@ -277,152 +276,145 @@ jobs:
             echo "::notice title=Disabled dylibs regex::$DISABLE"
           fi
 
-      # 11) Build using sidecar Makefile.ci with recipe-prefix (no TAB issues)
-      - name: Build Package (sidecar Makefile.ci; fixed tabs)
-  shell: bash
-  run: |
-    set -euxo pipefail
+      # 11) Build using sidecar Makefile.ci (TAB recipes preserved)
+      - name: Build Package (sidecar Makefile.ci; no repo Makefile)
+        shell: bash
+        run: |
+          set -euxo pipefail
 
-    # Guard: bundle id must not be a URL
-    if echo "${{ inputs.bundle_id }}" | grep -qiE 'https?://'; then
-      echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
-      exit 1
-    fi
+          # Guard: bundle id must not be a URL
+          if echo "${{ inputs.bundle_id }}" | grep -qiE 'https?://'; then
+            echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
+            exit 1
+          fi
 
-    # Write Makefile.ci (NOTE: recipe lines below BEGIN WITH A REAL TAB)
-    cat > Makefile.ci <<'MAKE'
-    export TARGET ?= iphone:clang:18.6:14.0
-    export SDK_PATH ?= $(THEOS)/sdks/iPhoneOS18.6.sdk/
-    export SYSROOT ?= $(SDK_PATH)
-    export ARCHS ?= arm64
+          # Write Makefile.ci (recipe lines below begin with a real TAB)
+          cat > Makefile.ci <<'MAKE'
+          export TARGET ?= iphone:clang:18.6:14.0
+          export SDK_PATH ?= $(THEOS)/sdks/iPhoneOS18.6.sdk/
+          export SYSROOT ?= $(SDK_PATH)
+          export ARCHS ?= arm64
 
-    export libcolorpicker_ARCHS ?= $(ARCHS)
-    export libFLEX_ARCHS        ?= $(ARCHS)
-    export Alderis_XCODEOPTS    ?= LD_DYLIB_INSTALL_NAME=@rpath/Alderis.framework/Alderis
-    export Alderis_XCODEFLAGS   ?= DYLIB_INSTALL_NAME_BASE=/Library/Frameworks BUILD_LIBRARY_FOR_DISTRIBUTION=YES ARCHS="$(ARCHS)"
-    export libcolorpicker_LDFLAGS ?= -F$(TARGET_PRIVATE_FRAMEWORK_PATH) -install_name @rpath/libcolorpicker.dylib
-    export ADDITIONAL_CFLAGS ?= -I$(THEOS_PROJECT_DIR)/Tweaks/RemoteLog -I$(THEOS_PROJECT_DIR)/Tweaks
+          export libcolorpicker_ARCHS ?= $(ARCHS)
+          export libFLEX_ARCHS        ?= $(ARCHS)
+          export Alderis_XCODEOPTS    ?= LD_DYLIB_INSTALL_NAME=@rpath/Alderis.framework/Alderis
+          export Alderis_XCODEFLAGS   ?= DYLIB_INSTALL_NAME_BASE=/Library/Frameworks BUILD_LIBRARY_FOR_DISTRIBUTION=YES ARCHS="$(ARCHS)"
+          export libcolorpicker_LDFLAGS ?= -F$(TARGET_PRIVATE_FRAMEWORK_PATH) -install_name @rpath/libcolorpicker.dylib
+          export ADDITIONAL_CFLAGS ?= -I$(THEOS_PROJECT_DIR)/Tweaks/RemoteLog -I$(THEOS_PROJECT_DIR)/Tweaks
 
-    PACKAGE_NAME     ?= YTLitePlus
-    PACKAGE_VERSION  ?= X.X.X-X.X
-    DISPLAY_NAME     ?= YouTube
-    BUNDLE_ID        ?= com.google.ios.youtube
-    INSTALL_TARGET_PROCESSES = YouTube
-    TWEAK_NAME = YTLitePlus
+          PACKAGE_NAME     ?= YTLitePlus
+          PACKAGE_VERSION  ?= X.X.X-X.X
+          DISPLAY_NAME     ?= YouTube
+          BUNDLE_ID        ?= com.google.ios.youtube
+          INSTALL_TARGET_PROCESSES = YouTube
+          TWEAK_NAME = YTLitePlus
 
-    # Sources
-    YTLitePlus_FILES = \
-        YTLitePlus.xm \
-        $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
+          YTLitePlus_FILES = \
+              YTLitePlus.xm \
+              $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
 
-    # Optional Core-Lite: drop files via SKIP_CORE_FILES
-    YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
+          YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
 
-    # Flags and frameworks
-    YTLitePlus_CFLAGS    = -fobjc-arc -Wno-deprecated-declarations -Wno-unsupported-availability-guard -Wno-unused-but-set-variable -DTWEAK_VERSION=$(PACKAGE_VERSION) $(EXTRA_CFLAGS)
-    YTLitePlus_FRAMEWORKS = UIKit Security
+          YTLitePlus_CFLAGS    = -fobjc-arc -Wno-deprecated-declarations -Wno-unsupported-availability-guard -Wno-unused-but-set-variable -DTWEAK_VERSION=$(PACKAGE_VERSION) $(EXTRA_CFLAGS)
+          YTLitePlus_FRAMEWORKS = UIKit Security
 
-    # Injected dylibs
-    YTLitePlus_INJECT_DYLIBS = \
-        Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib \
-        .theos/obj/libFLEX.dylib \
-        .theos/obj/YTUHD.dylib \
-        .theos/obj/YouPiP.dylib \
-        .theos/obj/YouTubeDislikesReturn.dylib \
-        .theos/obj/YTABConfig.dylib \
-        .theos/obj/DontEatMyContent.dylib \
-        .theos/obj/YTVideoOverlay.dylib \
-        .theos/obj/YouTimeStamp.dylib \
-        .theos/obj/YouGroupSettings.dylib
+          YTLitePlus_INJECT_DYLIBS = \
+              Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib \
+              .theos/obj/libFLEX.dylib \
+              .theos/obj/YTUHD.dylib \
+              .theos/obj/YouPiP.dylib \
+              .theos/obj/YouTubeDislikesReturn.dylib \
+              .theos/obj/YTABConfig.dylib \
+              .theos/obj/DontEatMyContent.dylib \
+              .theos/obj/YTVideoOverlay.dylib \
+              .theos/obj/YouTimeStamp.dylib \
+              .theos/obj/YouGroupSettings.dylib
 
-    # Embeds
-    YTLitePlus_EMBED_LIBRARIES  = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
-    YTLitePlus_EMBED_FRAMEWORKS = $(_THEOS_LOCAL_DATA_DIR)/$(_THEOS_OBJ_DIR_NAME)/install_Alderis.xcarchive/Products/var/jb/Library/Frameworks/Alderis.framework
-    YTLitePlus_EMBED_BUNDLES    = $(wildcard Bundles/*.bundle)
-    YTLitePlus_EMBED_EXTENSIONS = $(wildcard Extensions/*.appex)
+          YTLitePlus_EMBED_LIBRARIES  = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
+          YTLitePlus_EMBED_FRAMEWORKS = $(_THEOS_LOCAL_DATA_DIR)/$(_THEOS_OBJ_DIR_NAME)/install_Alderis.xcarchive/Products/var/jb/Library/Frameworks/Alderis.framework
+          YTLitePlus_EMBED_BUNDLES    = $(wildcard Bundles/*.bundle)
+          YTLitePlus_EMBED_EXTENSIONS = $(wildcard Extensions/*.appex)
 
-    # Target app path
-    YTLitePlus_IPA = ./tmp/Payload/YouTube.app
-    YTLitePlus_USE_FISHHOOK = 0
+          YTLitePlus_IPA = ./tmp/Payload/YouTube.app
+          YTLitePlus_USE_FISHHOOK = 0
 
-    include $(THEOS)/makefiles/common.mk
-    SUBPROJECTS += Tweaks/Alderis Tweaks/FLEXing/libflex Tweaks/YTUHD Tweaks/YouPiP Tweaks/Return-YouTube-Dislikes Tweaks/YTABConfig Tweaks/DontEatMyContent Tweaks/YTVideoOverlay Tweaks/YouTimeStamp Tweaks/YouGroupSettings
-    include $(THEOS_MAKE_PATH)/aggregate.mk
-    include $(THEOS_MAKE_PATH)/tweak.mk
+          include $(THEOS)/makefiles/common.mk
+          SUBPROJECTS += Tweaks/Alderis Tweaks/FLEXing/libflex Tweaks/YTUHD Tweaks/YouPiP Tweaks/Return-YouTube-Dislikes Tweaks/YTABConfig Tweaks/DontEatMyContent Tweaks/YTVideoOverlay Tweaks/YouTimeStamp Tweaks/YouGroupSettings
+          include $(THEOS_MAKE_PATH)/aggregate.mk
+          include $(THEOS_MAKE_PATH)/tweak.mk
 
-    FINALPACKAGE      = 1
-    REMOVE_EXTENSIONS = 1
-    CODESIGN_IPA      = 0
+          FINALPACKAGE      = 1
+          REMOVE_EXTENSIONS = 1
+          CODESIGN_IPA      = 0
 
-    # YTLite pre-extracted by earlier step
-    YTLITE_PATH   := Tweaks/YTLite
-    YTLITE_DEB    := $(firstword $(wildcard $(YTLITE_PATH)/*.deb))
-    YTLITE_DYLIB  := $(YTLITE_PATH)/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
-    YTLITE_BUNDLE := $(YTLITE_PATH)/var/jb/Library/Application\ Support/YTLite.bundle
+          YTLITE_PATH   := Tweaks/YTLite
+          YTLITE_DEB    := $(firstword $(wildcard $(YTLITE_PATH)/*.deb))
+          YTLITE_DYLIB  := $(YTLITE_PATH)/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
+          YTLITE_BUNDLE := $(YTLITE_PATH)/var/jb/Library/Application\ Support/YTLite.bundle
 
-    internal-clean::
-        @rm -rf "$(YTLITE_PATH)"/*
+          internal-clean::
+              @rm -rf "$(YTLITE_PATH)"/*
 
-    before-all::
-        @mkdir -p "$(YTLITE_PATH)"; \
-        if [ ! -f "$(YTLITE_DEB)" ]; then \
-            echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
-        fi; \
-        if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-            tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
-            tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
-            if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-                echo "==> Failed to extract YTLite"; exit 1; \
-            fi; \
-        fi
+          before-all::
+              @mkdir -p "$(YTLITE_PATH)"; \
+              if [ ! -f "$(YTLITE_DEB)" ]; then \
+                  echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
+              fi; \
+              if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
+                  tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
+                  tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
+                  if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
+                      echo "==> Failed to extract YTLite"; exit 1; \
+                  fi; \
+              fi
 
-    before-package::
-        @if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
-            echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
-            find .theos -type f -name "*.dylib" | while read f; do \
-                echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
-            done; \
-        fi
-    MAKE
+          before-package::
+              @if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
+                  echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
+                  find .theos -type f -name "*.dylib" | while read f; do \
+                      echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
+                  done; \
+              fi
+          MAKE
 
-    # Optional peek to confirm tabs are present (look for literal TABs at start of recipe lines)
-    sed -n '1,80p' Makefile.ci | nl
+          # Optional peek to confirm tabs
+          sed -n '1,80p' Makefile.ci | nl
 
-    # Core mode skip list (Full vs Core-Lite)
-    if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
-      SKIP_LIST="Source/Themes.xm Source/VersionSpooferLite.xm"
-    else
-      SKIP_LIST=""
-    fi
+          # Core mode skip list
+          if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
+            SKIP_LIST="Source/Themes.xm Source/VersionSpooferLite.xm"
+          else
+            SKIP_LIST=""
+          fi
 
-    # Choose make
-    if command -v gmake >/dev/null 2>&1; then MAKE_BIN=gmake; else MAKE_BIN=make; fi
+          # Choose make
+          if command -v gmake >/dev/null 2>&1; then MAKE_BIN=gmake; else MAKE_BIN=make; fi
 
-    # Build with CLI variables (no sed on any Makefile)
-    "$MAKE_BIN" -f Makefile.ci package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
-      BUNDLE_ID="${{ inputs.bundle_id }}" \
-      DISPLAY_NAME="${{ inputs.app_name }}" \
-      PACKAGE_VERSION="${YT_VERSION}-${YTLITE_VERSION}" \
-      TARGET="iphone:clang:${{ inputs.sdk_version }}:14.0" \
-      SDK_PATH="${THEOS}/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/" \
-      SKIP_CORE_FILES="${SKIP_LIST}" \
-      DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
+          # Build
+          "$MAKE_BIN" -f Makefile.ci package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
+            BUNDLE_ID="${{ inputs.bundle_id }}" \
+            DISPLAY_NAME="${{ inputs.app_name }}" \
+            PACKAGE_VERSION="${YT_VERSION}-${YTLITE_VERSION}" \
+            TARGET="iphone:clang:${{ inputs.sdk_version }}:14.0" \
+            SDK_PATH="${THEOS}/sdks/iPhoneOS${{ inputs.sdk_version }}.sdk/" \
+            SKIP_CORE_FILES="${SKIP_LIST}" \
+            DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
 
-    # Verify & rename artifact; emit hash
-    OUT="$(ls -t packages | head -n1 || true)"
-    mv "packages/${OUT}" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
-    echo "==> Listing packages/"
-    ls -lah packages || { echo "::error::No packages directory found"; exit 1; }
-    shopt -s nullglob
-    IPAS=(packages/*.ipa)
-    echo "==> IPA count: ${#IPAS[@]}"
-    if [ ${#IPAS[@]} -eq 0 ]; then
-      echo "::error::No IPA produced. Check build logs above for errors."
-      exit 1
-    fi
-    echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
-    echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
-    echo "==> Bundle ID: ${{ inputs.bundle_id }}"
+          # Verify & rename artifact; emit hash
+          OUT="$(ls -t packages | head -n1 || true)"
+          mv "packages/${OUT}" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
+          echo "==> Listing packages/"
+          ls -lah packages || { echo "::error::No packages directory found"; exit 1; }
+          shopt -s nullglob
+          IPAS=(packages/*.ipa)
+          echo "==> IPA count: ${#IPAS[@]}"
+          if [ ${#IPAS[@]} -eq 0 ]; then
+            echo "::error::No IPA produced. Check build logs above for errors."
+            exit 1
+          fi
+          echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
+          echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
+          echo "==> Bundle ID: ${{ inputs.bundle_id }}"
 
       # 12) Always upload artifact
       - name: Upload build artifacts (packages - always)
