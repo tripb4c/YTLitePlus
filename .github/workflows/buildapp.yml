@@ -6,6 +6,23 @@ name: Build and Release YTLitePlus
 on:
   workflow_dispatch:
     inputs:
+      # ===== NEW: choose which tweaks to disable this run =====
+      disable_profile:
+        description: "Which tweaks to disable for this build?"
+        required: true
+        type: choice
+        options:
+          - Minimal (stable baseline)
+          - Disable Group A (UI/Settings)
+          - Disable Group B (Playback/PiP/RYD/FLEX)
+          - None (enable everything)
+          - Custom (use custom_disable_regex)
+        default: Disable Group B (Playback/PiP/RYD/FLEX)
+      custom_disable_regex:
+        description: "If 'Custom', paste a regex of dylib names to disable (e.g. YTUHD|YouPiP)"
+        required: false
+        type: string
+      # ===== Original inputs =====
       sdk_version:
         description: "iOS SDK Version"
         default: "18.6"
@@ -124,19 +141,19 @@ jobs:
           (echo export PATH="/usr/local/opt/make/libexec/gnubin:$PATH" >> ~/.bash_profile)
           source ~/.bash_profile
 
-      # === Original mechanism: read URL from input, but harden it ===
+      # === Use original input URL, but make it safe: unescape &amp; and force Dropbox dl=1 ===
       - name: Hash YT IPA URL (normalize &amp; and Dropbox dl=1)
         run: |
           set -euo pipefail
           URL_YT="$(jq -r '.inputs.decrypted_youtube_url' "$GITHUB_EVENT_PATH")"
 
-          # Mask original (whatever it is)
+          # Mask original
           echo "::add-mask::$URL_YT"
 
-          # 1) Unescape '&amp;' -> '&' (common when copied from notes/editors)
+          # 1) Unescape '&amp;' -> '&'
           URL_YT="${URL_YT//&amp;/&}"
 
-          # 2) Normalize Dropbox links to exactly one dl=1 (pure Bash; no heredocs)
+          # 2) Normalize Dropbox links to exactly one dl=1 (pure Bash)
           if [[ "$URL_YT" =~ ^https?://www\.dropbox\.com/ ]]; then
             base="${URL_YT%%\?*}"
             if [[ "$base" == "$URL_YT" ]]; then
@@ -155,7 +172,7 @@ jobs:
             fi
           fi
 
-          # Export normalized URL for later steps
+          # Export normalized URL
           echo "YOUTUBE_URL=$URL_YT" >> "$GITHUB_ENV"
           echo "::add-mask::$URL_YT"
 
@@ -181,11 +198,11 @@ jobs:
             exit 1
           fi
 
-          # Unzip to tmp/Payload/YouTube.app (as expected by the build)
+          # Unzip to tmp/Payload/YouTube.app
           unzip -q YouTube.ipa -d tmp
           test -d tmp/Payload/YouTube.app || { echo "YouTube.app not found in IPA"; ls -lah tmp; exit 1; }
 
-          # Read YouTube CFBundleVersion → YT_VERSION
+          # Read YouTube CFBundleVersion -> YT_VERSION
           echo "YT_VERSION=$(grep -A 1 '<key>CFBundleVersion</key>' tmp/Payload/YouTube.app/Info.plist | grep '<string>' | awk -F'[><]' '{print $3}')" >> "$GITHUB_ENV"
 
           # Authenticated fetch of latest YTLite tag (avoid rate-limit / anon failures)
@@ -208,7 +225,7 @@ jobs:
           rm -rf tmp/Payload/YouTube.app/_CodeSignature/CodeResources
           rm -rf tmp/Payload/YouTube.app/PlugIns/*
 
-          # Remove UISupportedDevices from Info.plist (same as original)
+          # Remove UISupportedDevices from Info.plist
           python - <<'EOF'
           import plistlib
           filepath = 'tmp/Payload/YouTube.app/Info.plist'
@@ -222,6 +239,44 @@ jobs:
           # Re‑add the "Open in YouTube" extension
           cp -R Extensions/*.appex tmp/Payload/YouTube.app/PlugIns
 
+      # ===== NEW: decide which tweaks to disable this run =====
+      - name: Decide disabled tweaks
+        id: disable_set
+        env:
+          CHOICE: ${{ github.event.inputs.disable_profile }}
+          CUSTOM: ${{ github.event.inputs.custom_disable_regex }}
+        run: |
+          set -euo pipefail
+          case "${CHOICE}" in
+            "Minimal (stable baseline)")
+              # Keep only core + settings framework; turn off everything else for stability
+              DISABLE="libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay|YouTimeStamp|DontEatMyContent|YTABConfig|YouTubeDislikesReturn"
+              ;;
+            "Disable Group A (UI/Settings)")
+              # UI/Settings group
+              DISABLE="YTVideoOverlay|YouGroupSettings|YTABConfig|YouTimeStamp|DontEatMyContent"
+              ;;
+            "Disable Group B (Playback/PiP/RYD/FLEX)")
+              # Playback & tools group
+              DISABLE="YTUHD|YouPiP|YouTubeDislikesReturn|libFLEX"
+              ;;
+            "None (enable everything)")
+              DISABLE=""
+              ;;
+            "Custom (use custom_disable_regex)")
+              DISABLE="${CUSTOM}"
+              ;;
+            *)
+              DISABLE=""
+              ;;
+          esac
+          echo "regex=${DISABLE}" >> "$GITHUB_OUTPUT"
+          # Mask it in logs (can include repo-specific names)
+          if [ -n "${DISABLE}" ]; then
+            echo "::add-mask::${DISABLE}"
+          fi
+          echo "Using DISABLE_DYLIBS_REGEX='${DISABLE:-<none>}'"
+
       - name: Build Package
         id: build_package
         env:
@@ -229,11 +284,15 @@ jobs:
           BUNDLE_ID: ${{ inputs.bundle_id }}
           APP_NAME: ${{ inputs.app_name }}
           SDK_VER: ${{ inputs.sdk_version }}
+          # pass the resolved regex into this step
+          DISABLE_REGEX: ${{ steps.disable_set.outputs.regex }}
         run: |
           set -euxo pipefail
 
-          # If you want to prune crashy tweaks during testing, uncomment the next line:
-          # export DISABLE_DYLIBS_REGEX="libFLEX|YTUHD|YouPiP|YouGroupSettings|YTVideoOverlay"
+          # Apply the chosen disable set (may be empty to enable everything)
+          if [ -n "${DISABLE_REGEX:-}" ]; then
+            export DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
+          fi
 
           # Patch Makefile from inputs
           sed -i '' "s/^BUNDLE_ID.*$/BUNDLE_ID = ${BUNDLE_ID}/" Makefile
@@ -255,7 +314,7 @@ jobs:
           echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
           echo "==> Bundle ID: ${BUNDLE_ID}"
 
-      - name: Upload Artifact
+      - name: Upload Artifact (optional flag)
         if: ${{ inputs.upload_artifact }}
         uses: actions/upload-artifact@v4.5.0
         with:
@@ -263,7 +322,7 @@ jobs:
           path: packages/${{ steps.build_package.outputs.package }}
           if-no-files-found: error
           
-      - name: Upload Artifact to Catbox and update AltStore repo
+      - name: Upload Artifact to Catbox and update AltStore repo (optional flag)
         if: ${{ inputs.catbox_upload }}
         env:
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
@@ -293,14 +352,14 @@ jobs:
               --data-binary @- \
               "https://api.github.com/repos/Balackburn/YTLitePlusAltstore/actions/workflows/update_source.yml/dispatches"
 
-      - name: Prepare Release Notes
+      - name: Prepare Release Notes (optional flag)
         if: ${{ inputs.create_release }}
         run: |
           TODAY=$(date '+%Y-%m-%d')
           sed "s/%ytliteplus_version%/${YTLITE_VERSION}/g; s/%youtube_version%/${YT_VERSION}/g; s/%catbox_url%/${CATBOX_FILE}/g; s/%date%/$TODAY/g" \
             .github/RELEASE_TEMPLATE/Release.md > release_notes.md
 
-      - name: Create Draft Release
+      - name: Create Draft Release (optional flag)
         if: ${{ inputs.create_release }}
         id: create_release
         uses: softprops/action-gh-release@v2.5.0
@@ -318,24 +377,11 @@ jobs:
           {
             echo '### Build Complete'
             echo
+            echo "Disable profile: ${{ inputs.disable_profile }}"
+            if [ "${{ inputs.disable_profile }}" = "Custom (use custom_disable_regex)" ]; then
+              echo "Custom regex: ${{ inputs.custom_disable_regex }}"
+            fi
+            echo
             echo "YouTube: ${YT_VERSION}"
             echo "YTLite:  ${YTLITE_VERSION}"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Job Summary - Artifact Upload
-        if: ${{ inputs.upload_artifact }}
-        run: |
-          {
-            echo '### Artifact Upload'
-            echo
-            echo 'The artifact was uploaded successfully! Open the run and scroll to the "Artifacts" section to download it.'
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Job Summary - Catbox Upload
-        if: ${{ inputs.catbox_upload }}
-        run: |
-          {
-            echo '### Catbox Upload'
-            echo
-            echo "Permanent link: ${CATBOX_URL}"
           } >> "$GITHUB_STEP_SUMMARY"
