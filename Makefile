@@ -1,4 +1,8 @@
-# --- BEGIN: Overwrite Makefile safely (tabs preserved) ---
+set -euxo pipefail
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Overwrite Makefile on the runner (tabs preserved) to avoid "missing separator"
+# ──────────────────────────────────────────────────────────────────────────────
 cat > Makefile <<'MAKE'
 # ===== Theos / Target toolchain =====
 export TARGET      = iphone:clang:18.6:14.0
@@ -27,14 +31,12 @@ INSTALL_TARGET_PROCESSES = YouTube
 # ===== Tweak target =====
 TWEAK_NAME = YTLitePlus
 
-# Sources:
-#   - main tweak at repo root
-#   - extra sources under /Source
+# Sources (main file at repo root + everything in /Source)
 YTLitePlus_FILES = \
     YTLitePlus.xm \
     $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
 
-# Optional safe mode (Core-Lite): set SKIP_CORE_FILES to a space-separated list (we pass it from CI)
+# Optional safe mode (Core-Lite): set SKIP_CORE_FILES as a space-separated list
 YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
 
 # Build flags
@@ -133,12 +135,45 @@ before-package::
         done; \
     fi
 MAKE
-# --- END: Overwrite Makefile safely ---
 
-# Show Makefile with visible TABs (just for troubleshooting once)
+# Optional: one-time debug to visualize TABs on recipe lines
 # sed -n '1,140p' Makefile | sed -e $'s/\t/[TAB]\t/g' | nl
 
-# Build with Core-Lite on first pass (skip early/fragile hooks)
+# ──────────────────────────────────────────────────────────────────────────────
+# Keep your existing safety checks + sed patches
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Safety: validate BUNDLE_ID looks like a bundle id, not a URL
+if echo "${BUNDLE_ID}" | grep -qiE 'https?://'; then
+  echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
+  exit 1
+fi
+
+# Apply chosen disable set
+if [ -n "${DISABLE_REGEX:-}" ]; then
+  export DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
+fi
+
+# Patch Makefile from inputs (ok to run even after overwrite)
+sed -i '' "s/^BUNDLE_ID.*$/BUNDLE_ID = ${BUNDLE_ID}/" Makefile
+sed -i '' "s/^DISPLAY_NAME.*$/DISPLAY_NAME = ${APP_NAME}/" Makefile
+sed -i '' "s/^PACKAGE_VERSION.*$/PACKAGE_VERSION = ${YT_VERSION}-${YTLITE_VERSION}/" Makefile
+sed -i '' "s/^export TARGET.*$/export TARGET = iphone:clang:${SDK_VER}:14.0/" Makefile
+sed -i '' "s|^export SDK_PATH.*$|export SDK_PATH = \$(THEOS)/sdks/iPhoneOS${SDK_VER}.sdk/|" Makefile
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Build (Core-Lite ON for the first pass to avoid early fragile hooks)
+# ──────────────────────────────────────────────────────────────────────────────
 make package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
   YTLITE_VERSION="${YTLITE_VERSION}" \
   SKIP_CORE_FILES="Source/Themes.xm Source/VersionSpooferLite.xm"
+
+# Rename to friendly name (ignore error if already matched)
+mv "packages/$(ls -t packages | head -n1)" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
+
+# Expose final name to later steps
+echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
+
+# Show hash & bundle id
+echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
+echo "==> Bundle ID: ${BUNDLE_ID}"
