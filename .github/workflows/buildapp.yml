@@ -88,7 +88,6 @@ jobs:
           set -euxo pipefail
           brew update
           brew install jq curl unzip ldid dpkg gnu-sed make
-          # Put GNU make 'gnubin' first so 'make' is GNU make
           echo "$(brew --prefix make)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Download Theos
@@ -136,7 +135,7 @@ jobs:
         run: |
           set -euo pipefail
           RAW="${{ inputs.decrypted_youtube_url }}"
-          # Unescape '&amp;' → '&'
+          # Unescape "&amp;" -> "&"
           RAW="${RAW//&amp;/&}"
           # Dropbox: preserve all params (incl. rlkey=) and force dl=1
           if [[ "$RAW" =~ ^https?://www\.dropbox\.com/ ]]; then
@@ -157,9 +156,8 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
-
           if [ -z "${YOUTUBE_URL:-}" ]; then
-            echo "::error::YOUTUBE_URL is empty. URL normalization step didn’t export it."
+            echo "::error::YOUTUBE_URL is empty. URL normalization step did not export it."
             exit 1
           fi
           echo "YOUTUBE_URL starts with: ${YOUTUBE_URL:0:100}..."
@@ -210,11 +208,11 @@ jobs:
                 echo "==> Fallback download OK"
               else
                 RC2=$?
-                echo "::error::Dropbox served a landing page or too-small file (primary RC=$RC, fallback RC=$RC2)."
+                echo "::error::Dropbox served a landing page or a too-small file (primary RC=$RC, fallback RC=$RC2)."
                 echo "Tips:"
-                echo "  • Ensure the link is a FILE share (not a folder)."
-                echo "  • Keep the rlkey=… parameter."
-                echo "  • Or upload to Catbox and paste that direct URL."
+                echo "  - Ensure the link is a FILE share (not a folder)."
+                echo "  - Keep the rlkey=... parameter."
+                echo "  - Or upload to Catbox and paste that direct URL."
                 exit 1
               fi
             else
@@ -231,7 +229,7 @@ jobs:
           rm -rf tmp/Payload/YouTube.app/_CodeSignature || true
           rm -rf tmp/Payload/YouTube.app/PlugIns/* || true
 
-          # Remove UISupportedDevices
+          # Remove UISupportedDevices (some SDKs choke on it)
           python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; pl=plistlib.load(open(p,"rb")); pl.pop("UISupportedDevices",None); plistlib.dump(pl,open(p,"wb"))'
 
           # Re-add local Extensions if present
@@ -318,13 +316,11 @@ jobs:
         run: |
           set -euxo pipefail
 
-          # Guard: bundle id must not be a URL
           if echo "${{ inputs.bundle_id }}" | grep -qiE 'https?://'; then
             echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
             exit 1
           fi
 
-          # Create sidecar Makefile.ci (tabs preserved)
           cat > Makefile.ci <<'MAKE'
           # ===== Theos / Target toolchain =====
           export TARGET      ?= iphone:clang:18.6:14.0
@@ -332,7 +328,6 @@ jobs:
           export SYSROOT     ?= $(SDK_PATH)
           export ARCHS       ?= arm64
 
-          # Build flags for embedded libs
           export libcolorpicker_ARCHS ?= $(ARCHS)
           export libFLEX_ARCHS        ?= $(ARCHS)
           export Alderis_XCODEOPTS    ?= LD_DYLIB_INSTALL_NAME=@rpath/Alderis.framework/Alderis
@@ -354,7 +349,6 @@ jobs:
             YTLitePlus.xm \
             $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
 
-          # Honor skip list from CLI
           YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
 
           YTLitePlus_CFLAGS = -fobjc-arc \
@@ -407,7 +401,6 @@ jobs:
           REMOVE_EXTENSIONS = 1
           CODESIGN_IPA      = 0
 
-          # Use the pre-downloaded deb (CI placed it here)
           YTLITE_PATH    := Tweaks/YTLite
           YTLITE_DEB     := $(firstword $(wildcard $(YTLITE_PATH)/*.deb))
           YTLITE_DYLIB   := $(YTLITE_PATH)/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
@@ -438,20 +431,16 @@ jobs:
             fi
           MAKE
 
-          # Quick peek to verify TABs (for troubleshooting)
           sed -n '1,40p' Makefile.ci | sed -e $'s/\t/[TAB]\t/g' | nl
 
-          # Decide core mode skip list
           if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
             SKIP_LIST="Source/Themes.xm Source/VersionSpooferLite.xm"
           else
             SKIP_LIST=""
           fi
 
-          # Use gmake if available; else make
           if command -v gmake >/dev/null 2>&1; then MAKE_BIN=gmake; else MAKE_BIN=make; fi
 
-          # Build with CLI variables (no sed on any Makefile)
           "$MAKE_BIN" -f Makefile.ci package SIDELOAD=1 THEOS_PACKAGE_SCHEME=rootless FINALPACKAGE=1 \
             BUNDLE_ID="${{ inputs.bundle_id }}" \
             DISPLAY_NAME="${{ inputs.app_name }}" \
@@ -461,7 +450,6 @@ jobs:
             SKIP_CORE_FILES="$SKIP_LIST" \
             DISABLE_DYLIBS_REGEX="${DISABLE_REGEX}"
 
-          # Verify & rename artifact; emit hash
           OUT="$(ls -t packages | head -n1)"
           mv "packages/${OUT}" "packages/YTLitePlus_${YT_VERSION}_${YTLITE_VERSION}.ipa" || true
           echo "==> Listing packages/"
@@ -475,9 +463,11 @@ jobs:
           fi
           echo "package=$(ls -t packages | head -n1)" >> "$GITHUB_OUTPUT"
           echo "==> SHASUM256: $(shasum -a 256 packages/*.ipa | cut -f1 -d' ')"
-          echo "==> Bundle ID: ${{ inputs.bundle_id }}"
+          echo "==> Bundle ID: ${{
+            inputs.bundle_id
+          }}"
 
-      - name: Upload build artifacts (packages/ – always)
+      - name: Upload build artifacts (packages - always)
         uses: actions/upload-artifact@v4
         with:
           name: ytliteplus-packages
@@ -492,7 +482,10 @@ jobs:
           FILE="packages/$(ls -t packages | head -n1)"
           RESPONSE=$(curl -sS -F "reqtype=fileupload" -F "fileToUpload=@${FILE}" https://catbox.moe/user/api.php)
           CATBOX_URL=$(echo "$RESPONSE" | grep -o -E 'https://files.catbox.moe/[^"]*' || true)
-          test -n "$CATBOX_URL"
+          if [ -z "$CATBOX_URL" ]; then
+            echo "::error::Catbox upload did not return a valid URL."
+            exit 1
+          fi
           echo "CATBOX_URL=$CATBOX_URL" >> "$GITHUB_ENV"
           echo "::notice title=Catbox::${CATBOX_URL}"
 
@@ -507,10 +500,10 @@ jobs:
           draft: true
           files: packages/*.ipa
           body: |
-            **YouTube (CFBundleVersion):** ${{ env.YT_VERSION }}
-            **YTLite tag:** ${{ env.YTLITE_VERSION }}
-            **Core Mode:** ${{ inputs.core_mode }}
-            **Disable Profile:** ${{ inputs.disable_profile }}
+            YouTube (CFBundleVersion): ${{ env.YT_VERSION }}
+            YTLite tag: ${{ env.YTLITE_VERSION }}
+            Core Mode: ${{ inputs.core_mode }}
+            Disable Profile: ${{ inputs.disable_profile }}
 
       - name: Job Summary
         shell: bash
@@ -518,8 +511,8 @@ jobs:
           {
             echo "### Build Complete"
             echo
-            echo "- **YouTube (CFBundleVersion):** ${YT_VERSION}"
-            echo "- **YTLite tag:** ${YTLITE_VERSION}"
-            echo "- **Core Mode:** ${{ inputs.core_mode }}"
-            echo "- **Disable Profile:** ${{ inputs.disable_profile }}"
+            echo "- YouTube (CFBundleVersion): ${YT_VERSION}"
+            echo "- YTLite tag: ${YTLITE_VERSION}"
+            echo "- Core Mode: ${{ inputs.core_mode }}"
+            echo "- Disable Profile: ${{ inputs.disable_profile }}"
           } >> "$GITHUB_STEP_SUMMARY"
