@@ -32,7 +32,9 @@ on:
         description: "Core mode"
         required: true
         type: choice
-        options: ["Full", "Core-Lite (safer)"]
+        options:
+          - "Full"
+          - "Core-Lite (safer)"
         default: "Core-Lite (safer)"
       disable_profile:
         description: "Disable a set of tweaks (regex applied to built dylibs)"
@@ -134,12 +136,12 @@ jobs:
         run: |
           set -euo pipefail
           RAW="${{ inputs.decrypted_youtube_url }}"
-          # Unescape any &amp; to &
+          # Unescape '&amp;' to '&'
           RAW="${RAW//&amp;/&}"
-          # Force Dropbox direct download
+          # Force Dropbox direct download for any www.dropbox.com link (including scl/fi)
           if [[ "$RAW" =~ ^https?://www\.dropbox\.com/ ]]; then
-            base="${RAW%%\?*}"
-            RAW="${base}?dl=1"
+            BASE="${RAW%%\?*}"
+            RAW="${BASE}?dl=1"
           fi
           echo "YOUTUBE_URL=$RAW" >> "$GITHUB_ENV"
           echo "::add-mask::$RAW"
@@ -152,18 +154,29 @@ jobs:
           if [ -z "${YOUTUBE_URL:-}" ]; then
             echo "::error::YOUTUBE_URL is empty. URL normalization step didn’t export it."; exit 1
           fi
-          echo "YOUTUBE_URL starts with: ${YOUTUBE_URL:0:60}..."
+          echo "YOUTUBE_URL starts with: ${YOUTUBE_URL:0:80}..."
 
-          # Download
+          # Download with headers captured
+          rm -f YouTube.ipa headers.txt
           curl -L --fail --retry 5 --retry-delay 3 \
+            -D headers.txt \
             -H "User-Agent: YTLitePlus-CI" \
             "${YOUTUBE_URL}" -o YouTube.ipa
 
-          # Sanity: >10MB (avoid HTML page)
+          echo "==> Response headers (first lines):"
+          sed -n '1,20p' headers.txt || true
+
+          # Content-Type sanity: HTML indicates landing page
+          if grep -qiE '^Content-Type:\s*text/html' headers.txt; then
+            echo "::error::Server returned text/html (likely a landing page). Check the link or ensure Dropbox ends with ?dl=1."
+            exit 1
+          fi
+
+          # Size sanity: >10MB
           MIN=$((10*1024*1024))
           ACT=$(stat -f%z YouTube.ipa)
           if [ "$ACT" -lt "$MIN" ]; then
-            echo "::error::Downloaded IPA is too small ($ACT bytes) — likely an HTML error page."
+            echo "::error::Downloaded IPA is too small ($ACT bytes) — likely an HTML/error page."
             exit 1
           fi
 
@@ -171,7 +184,7 @@ jobs:
           unzip -q YouTube.ipa -d tmp
           test -d tmp/Payload/YouTube.app || { echo "::error::YouTube.app missing in IPA"; exit 1; }
 
-          # Parse CFBundleVersion (inline python, safe for YAML)
+          # Parse CFBundleVersion (inline python; YAML-safe)
           YT_VERSION=$(python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; print(plistlib.load(open(p,"rb")).get("CFBundleVersion","0"))')
           echo "YT_VERSION=${YT_VERSION}" >> "$GITHUB_ENV"
 
@@ -182,8 +195,8 @@ jobs:
           # Remove UISupportedDevices (some SDKs choke on it)
           python3 -c 'import plistlib; p="tmp/Payload/YouTube.app/Info.plist"; pl=plistlib.load(open(p,"rb")); pl.pop("UISupportedDevices",None); plistlib.dump(pl,open(p,"wb"))'
 
-          # Re-add any local extensions if present
-          if [ -d "Extensions" ] && compgen -G "Extensions/*.appex" > 0; then
+          # Re-add local Extensions if present
+          if [ -d "Extensions" ] && compgen -G "Extensions/*.appex" > /dev/null; then
             mkdir -p tmp/Payload/YouTube.app/PlugIns
             cp -R Extensions/*.appex tmp/Payload/YouTube.app/PlugIns || true
           fi
@@ -249,150 +262,3 @@ jobs:
             "None (enable everything)")
               DISABLE=""
               ;;
-            "Custom (use custom_disable_regex)")
-              DISABLE="$CUSTOM"
-              ;;
-            *)
-              DISABLE=""
-              ;;
-          esac
-          echo "DISABLE_REGEX=$DISABLE" >> "$GITHUB_ENV"
-          if [ -n "$DISABLE" ]; then
-            echo "::notice title=Disabled dylibs regex::$DISABLE"
-          fi
-
-      - name: Build Package (sidecar Makefile.ci; no repo Makefile)
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          # Guard: bundle id must not be a URL
-          if echo "${{ inputs.bundle_id }}" | grep -qiE 'https?://'; then
-            echo "::error::Bundle ID looks like a URL. Put the URL in decrypted_youtube_url, not bundle_id."
-            exit 1
-          fi
-
-          # Create sidecar Makefile.ci (tabs preserved)
-          cat > Makefile.ci <<'MAKE'
-          # ===== Theos / Target toolchain =====
-          export TARGET      ?= iphone:clang:18.6:14.0
-          export SDK_PATH    ?= $(THEOS)/sdks/iPhoneOS18.6.sdk/
-          export SYSROOT     ?= $(SDK_PATH)
-          export ARCHS       ?= arm64
-
-          # Build flags for embedded libs
-          export libcolorpicker_ARCHS ?= $(ARCHS)
-          export libFLEX_ARCHS        ?= $(ARCHS)
-          export Alderis_XCODEOPTS    ?= LD_DYLIB_INSTALL_NAME=@rpath/Alderis.framework/Alderis
-          export Alderis_XCODEFLAGS   ?= DYLIB_INSTALL_NAME_BASE=/Library/Frameworks BUILD_LIBRARY_FOR_DISTRIBUTION=YES ARCHS="$(ARCHS)"
-          export libcolorpicker_LDFLAGS ?= -F$(TARGET_PRIVATE_FRAMEWORK_PATH) -install_name @rpath/libcolorpicker.dylib
-
-          export ADDITIONAL_CFLAGS ?= -I$(THEOS_PROJECT_DIR)/Tweaks/RemoteLog -I$(THEOS_PROJECT_DIR)/Tweaks
-
-          PACKAGE_NAME     ?= YTLitePlus
-          PACKAGE_VERSION  ?= X.X.X-X.X
-          DISPLAY_NAME     ?= YouTube
-          BUNDLE_ID        ?= com.google.ios.youtube
-
-          INSTALL_TARGET_PROCESSES = YouTube
-
-          TWEAK_NAME = YTLitePlus
-
-          YTLitePlus_FILES = \
-            YTLitePlus.xm \
-            $(shell find Source -name '*.xm' -o -name '*.x' -o -name '*.m')
-
-          # Honor skip list from CLI
-          YTLitePlus_FILES := $(filter-out $(SKIP_CORE_FILES),$(YTLitePlus_FILES))
-
-          YTLitePlus_CFLAGS = -fobjc-arc \
-            -Wno-deprecated-declarations \
-            -Wno-unsupported-availability-guard \
-            -Wno-unused-but-set-variable \
-            -DTWEAK_VERSION=$(PACKAGE_VERSION) \
-            $(EXTRA_CFLAGS)
-
-          YTLitePlus_FRAMEWORKS = UIKit Security
-
-          YTLitePlus_INJECT_DYLIBS = \
-            Tweaks/YTLite/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib \
-            .theos/obj/libFLEX.dylib \
-            .theos/obj/YTUHD.dylib \
-            .theos/obj/YouPiP.dylib \
-            .theos/obj/YouTubeDislikesReturn.dylib \
-            .theos/obj/YTABConfig.dylib \
-            .theos/obj/DontEatMyContent.dylib \
-            .theos/obj/YTVideoOverlay.dylib \
-            .theos/obj/YouTimeStamp.dylib \
-            .theos/obj/YouGroupSettings.dylib
-
-          YTLitePlus_EMBED_LIBRARIES  = $(THEOS_OBJ_DIR)/libcolorpicker.dylib
-          YTLitePlus_EMBED_FRAMEWORKS = $(_THEOS_LOCAL_DATA_DIR)/$(_THEOS_OBJ_DIR_NAME)/install_Alderis.xcarchive/Products/var/jb/Library/Frameworks/Alderis.framework
-          YTLitePlus_EMBED_BUNDLES    = $(wildcard Bundles/*.bundle)
-          YTLitePlus_EMBED_EXTENSIONS = $(wildcard Extensions/*.appex)
-
-          YTLitePlus_IPA = ./tmp/Payload/YouTube.app
-          YTLitePlus_USE_FISHHOOK = 0
-
-          include $(THEOS)/makefiles/common.mk
-
-          SUBPROJECTS += \
-            Tweaks/Alderis \
-            Tweaks/FLEXing/libflex \
-            Tweaks/YTUHD \
-            Tweaks/YouPiP \
-            Tweaks/Return-YouTube-Dislikes \
-            Tweaks/YTABConfig \
-            Tweaks/DontEatMyContent \
-            Tweaks/YTVideoOverlay \
-            Tweaks/YouTimeStamp \
-            Tweaks/YouGroupSettings
-          include $(THEOS_MAKE_PATH)/aggregate.mk
-
-          include $(THEOS_MAKE_PATH)/tweak.mk
-
-          FINALPACKAGE      = 1
-          REMOVE_EXTENSIONS = 1
-          CODESIGN_IPA      = 0
-
-          # Use the pre-downloaded deb (CI placed it here)
-          YTLITE_PATH    := Tweaks/YTLite
-          YTLITE_DEB     := $(firstword $(wildcard $(YTLITE_PATH)/*.deb))
-          YTLITE_DYLIB   := $(YTLITE_PATH)/var/jb/Library/MobileSubstrate/DynamicLibraries/YTLite.dylib
-          YTLITE_BUNDLE  := $(YTLITE_PATH)/var/jb/Library/Application\ Support/YTLite.bundle
-
-          internal-clean::
-            @rm -rf "$(YTLITE_PATH)"/*
-
-          before-all::
-            @mkdir -p "$(YTLITE_PATH)"; \
-            if [ ! -f "$(YTLITE_DEB)" ]; then \
-              echo "==> No local YTLite .deb found. Ensure pre-download step ran."; exit 1; \
-            fi; \
-            if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-              tar -xf "$(YTLITE_DEB)" -C "$(YTLITE_PATH)"; \
-              tar -xf "$(YTLITE_PATH)/data.tar"* -C "$(YTLITE_PATH)"; \
-              if [ ! -f "$(YTLITE_DYLIB)" ] || [ ! -d "$(YTLITE_BUNDLE)" ]; then \
-                echo "==> Failed to extract YTLite"; exit 1; \
-              fi; \
-            fi
-
-          before-package::
-            @if [ -n "$(DISABLE_DYLIBS_REGEX)" ]; then \
-              echo "==> Disabling dylibs matching: $(DISABLE_DYLIBS_REGEX)"; \
-              find .theos -type f -name "*.dylib" | while read f; do \
-                echo "$$f" | grep -Eq "($(DISABLE_DYLIBS_REGEX))" && { echo "  - removing $$f"; rm -f "$$f"; }; \
-              done; \
-            fi
-          MAKE
-
-          # Quick peek to verify TABs (for troubleshooting)
-          sed -n '1,40p' Makefile.ci | sed -e $'s/\t/[TAB]\t/g' | nl
-
-          # Decide core mode skip list
-          if [ "${{ inputs.core_mode }}" = "Core-Lite (safer)" ]; then
-            SKIP_LIST="Source/Themes.xm Source/VersionSpooferLite.xm"
-          else
-            SKIP_LIST=""
-          fi
-
